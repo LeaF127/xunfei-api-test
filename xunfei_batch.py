@@ -78,6 +78,7 @@ def main():
 
         # ---- ASR ----
         asr_text, cer = "", 1.0
+        asr_ttft, asr_total, asr_rtf = None, None, None
         if not os.path.exists(audio):
             print(f"  ⚠ 音频不存在: {audio}")
             fail += 1
@@ -86,6 +87,9 @@ def main():
                 resampled = resample_streaming(audio)
                 asr_text  = asr_api.recognize(resampled)
                 cer       = calculate_cer(sentence, asr_text)
+                asr_ttft  = asr_api.ttft
+                asr_total = asr_api.total_time
+                asr_rtf   = asr_api.rtf
                 ok += 1
                 # 清理临时重采样文件
                 if resampled != audio and os.path.exists(resampled):
@@ -96,21 +100,21 @@ def main():
 
         print(f"  识别: {asr_text}")
         print(f"  CER:  {cer:.4f}")
-
-        # 保存单条 ASR 结果
-        rec = {"index": seq, "filename": fname, "ground_truth": sentence,
-               "asr_result": asr_text, "cer": round(cer, 4),
-               "timestamp": datetime.now().isoformat()}
-        results.append(rec)
-        with open(os.path.join(args.output_asr, f"result_{seq:04d}.json"), "w", encoding="utf-8") as f:
-            json.dump(rec, f, ensure_ascii=False, indent=2)
+        if asr_ttft is not None:
+            print(f"  ASR TTFT: {asr_ttft*1000:.1f} ms | 总耗时: {asr_total*1000:.1f} ms | RTF: {asr_rtf:.4f}")
 
         # ---- TTS ----
+        tts_ttft, tts_total, tts_rtf = None, None, None
         tts_out = os.path.join(args.output_tts, fname)
         try:
             r = tts_api.synthesize(sentence, output_file=tts_out)
+            tts_ttft  = tts_api.ttft
+            tts_total = tts_api.total_time
+            tts_rtf   = tts_api.rtf
             if r:
                 print(f"  ✅ TTS → {tts_out}")
+                if tts_ttft is not None:
+                    print(f"  TTS TTFT: {tts_ttft*1000:.1f} ms | 总耗时: {tts_total*1000:.1f} ms | RTF: {tts_rtf:.4f}")
             else:
                 print(f"  ❌ TTS 合成失败")
         except Exception as e:
@@ -118,11 +122,42 @@ def main():
 
         time.sleep(0.1)
 
+        # ---- 保存单条记录 ----
+        rec = {
+            "index": seq, "filename": fname, "ground_truth": sentence,
+            "asr_result": asr_text, "cer": round(cer, 4),
+            "asr_ttft_ms":      round(asr_ttft * 1000, 1)  if asr_ttft  is not None else None,
+            "asr_total_time_ms": round(asr_total * 1000, 1) if asr_total is not None else None,
+            "asr_rtf":          round(asr_rtf, 4)           if asr_rtf   is not None else None,
+            "tts_ttft_ms":      round(tts_ttft * 1000, 1)  if tts_ttft  is not None else None,
+            "tts_total_time_ms": round(tts_total * 1000, 1) if tts_total is not None else None,
+            "tts_rtf":          round(tts_rtf, 4)           if tts_rtf   is not None else None,
+            "timestamp": datetime.now().isoformat(),
+        }
+        results.append(rec)
+        with open(os.path.join(args.output_asr, f"result_{seq:04d}.json"), "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=2)
+
     # ---- 汇总 ----
     avg_cer = sum(r["cer"] for r in results) / len(results) if results else 0
-    summary = {"total": len(results), "success": ok, "fail": fail,
-               "average_cer": round(avg_cer, 4), "timestamp": datetime.now().isoformat(),
-               "results": results}
+
+    # 计算各指标平均值（忽略 None）
+    def _avg(key):
+        vals = [r[key] for r in results if r[key] is not None]
+        return sum(vals) / len(vals) if vals else None
+
+    summary = {
+        "total": len(results), "success": ok, "fail": fail,
+        "average_cer": round(avg_cer, 4),
+        "average_asr_ttft_ms":      round(_avg("asr_ttft_ms"), 1)       if _avg("asr_ttft_ms")      is not None else None,
+        "average_asr_total_time_ms": round(_avg("asr_total_time_ms"), 1) if _avg("asr_total_time_ms") is not None else None,
+        "average_asr_rtf":          round(_avg("asr_rtf"), 4)           if _avg("asr_rtf")          is not None else None,
+        "average_tts_ttft_ms":      round(_avg("tts_ttft_ms"), 1)       if _avg("tts_ttft_ms")      is not None else None,
+        "average_tts_total_time_ms": round(_avg("tts_total_time_ms"), 1) if _avg("tts_total_time_ms") is not None else None,
+        "average_tts_rtf":          round(_avg("tts_rtf"), 4)           if _avg("tts_rtf")          is not None else None,
+        "timestamp": datetime.now().isoformat(),
+        "results": results,
+    }
     with open(os.path.join(args.output_asr, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
@@ -131,10 +166,13 @@ def main():
 
     print(f"\n{'='*50}")
     print(f"🎉 完成！  总计 {len(results)} | 成功 {ok} | 失败 {fail} | 平均CER {avg_cer:.4f}")
+    if _avg("asr_ttft_ms") is not None:
+        print(f"   ASR 平均 TTFT: {_avg('asr_ttft_ms'):.1f} ms | 平均 RTF: {_avg('asr_rtf'):.4f}")
+    if _avg("tts_ttft_ms") is not None:
+        print(f"   TTS 平均 TTFT: {_avg('tts_ttft_ms'):.1f} ms | 平均 RTF: {_avg('tts_rtf'):.4f}")
     print(f"   ASR → {args.output_asr}/")
     print(f"   TTS → {args.output_tts}/")
 
 
 if __name__ == "__main__":
     main()
-

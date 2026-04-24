@@ -13,11 +13,84 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import time
 import websocket  # pip install websocket-client
 from urllib.parse import urlencode, urlparse
 
 from config import APP_ID, API_KEY, API_SECRET
+
+# ===================== 音频时长工具函数 =====================
+
+def _estimate_mp3_duration(data: bytes) -> float:
+    """通过解析 MP3 帧头来估算音频时长（秒）"""
+    if len(data) < 4:
+        return 0.0
+
+    # 跳过 ID3v2 标签（如果有）
+    i = 0
+    if data[:3] == b"ID3":
+        if len(data) >= 10:
+            tag_size = ((data[6] & 0x7F) << 21) | ((data[7] & 0x7F) << 14) | \
+                       ((data[8] & 0x7F) << 7) | (data[9] & 0x7F)
+            i = 10 + tag_size
+
+    total_samples = 0
+    sample_rate = 0
+
+    # MPEG1 Layer III 比特率表 (kbps)
+    bitrate_v1 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0]
+    # MPEG2/2.5 Layer III 比特率表 (kbps)
+    bitrate_v2 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0]
+    sr_v1  = [44100, 48000, 32000]
+    sr_v2  = [22050, 24000, 16000]
+    sr_v25 = [11025, 12000, 8000]
+
+    while i <= len(data) - 4:
+        if data[i] != 0xFF or (data[i + 1] & 0xE0) != 0xE0:
+            i += 1
+            continue
+
+        b1, b2 = data[i + 1], data[i + 2]
+        version_bits = (b1 >> 3) & 3   # 0=2.5, 1=reserved, 2=2, 3=1
+        layer_bits   = (b1 >> 1) & 3   # 0=reserved, 1=III, 2=II, 3=I
+        br_idx       = (b2 >> 4) & 0xF
+        sr_idx       = (b2 >> 2) & 3
+        pad          = (b2 >> 1) & 1
+
+        if version_bits == 1 or layer_bits == 0 or sr_idx == 3 or br_idx in (0, 15):
+            i += 1
+            continue
+
+        if version_bits == 3:  # MPEG1
+            bitrate     = bitrate_v1[br_idx] * 1000
+            sample_rate = sr_v1[sr_idx]
+            spf         = 1152 if layer_bits in (1, 2) else 384
+        else:  # MPEG2 / MPEG2.5
+            bitrate     = bitrate_v2[br_idx] * 1000
+            sample_rate = (sr_v2 if version_bits == 2 else sr_v25)[sr_idx]
+            spf         = 576 if layer_bits == 1 else (1152 if layer_bits == 2 else 384)
+
+        if bitrate == 0 or sample_rate == 0:
+            i += 1
+            continue
+
+        frame_size = (spf * bitrate // (8 * sample_rate)) + pad
+        total_samples += spf
+        i += frame_size
+
+    return total_samples / sample_rate if sample_rate > 0 else 0.0
+
+
+def _get_audio_duration(audio_data: bytes, encoding: str, sample_rate: int) -> float:
+    """根据音频数据和编码方式计算音频时长（秒）"""
+    if encoding == "raw":
+        # PCM 16-bit 单声道
+        return len(audio_data) / (sample_rate * 2)
+    elif encoding in ("lame", "mp3"):
+        return _estimate_mp3_duration(audio_data)
+    return 0.0
+
 
 # ===================== 鉴权工具函数 =====================
 
@@ -86,6 +159,14 @@ class XunFeiASR:
         self.api_secret = api_secret
         self.result_text = ""
 
+        # 性能指标
+        self.ttft = None        # 首字节延迟（秒）：从发送请求到收到第一个识别结果
+        self.total_time = None  # 总处理时间（秒）：从开始到识别结束
+        self.rtf = None         # 实时率 = 处理时间 / 音频时长
+        # 内部计时变量
+        self._asr_start = None
+        self._first_result_time = None
+
     def _build_first_frame(self, audio_format: str = "audio/L16;rate=16000",
                            encoding: str = "raw",
                            language: str = "zh_cn",
@@ -99,7 +180,7 @@ class XunFeiASR:
                 "domain": domain,       # iat: 日常用语
                 "accent": accent,       # mandarin: 普通话
                 # "dwa": "wpgs",        # 开启动态修正（仅中文）
-                # "eos": 3000,          # 后端点静默时间(ms), 默认2000
+                # "eos": 3000,          # 后端点静音时间(ms), 默认2000
                 # "ptt": 1,             # 标点符号 1:开启 0:关闭
             },
             "data": {
@@ -139,22 +220,31 @@ class XunFeiASR:
             识别文本结果
         """
         self.result_text = ""
+        self.ttft = None
+        self.total_time = None
+        self.rtf = None
+        self._first_result_time = None
+
         url = create_auth_url(self.BASE_URL, self.api_key, self.api_secret)
 
         # 读取音频文件
         if isinstance(audio_file_path, str):
-            # 文件路径就读取文件内容
             with open(audio_file_path, "rb") as f:
                 audio_data = f.read()
         elif isinstance(audio_file_path, bytes):
-            # 音频数据直接用
             audio_data = audio_file_path
         else:
-            # 不知道是什么类型，报错
             raise TypeError("audio_file_path 必须是文件路径(str)或音频数据(bytes)")
-            
-        # 分帧发送
+
+        # 从 audio_format 中提取采样率
+        sr_match = re.search(r"rate=(\d+)", audio_format)
+        sample_rate = int(sr_match.group(1)) if sr_match else 16000
+        audio_duration = _get_audio_duration(audio_data, encoding, sample_rate)
+
         frame_size = 1280
+
+        # 开始计时
+        self._asr_start = time.perf_counter()
 
         ws = websocket.WebSocketApp(
             url,
@@ -164,6 +254,13 @@ class XunFeiASR:
             on_close=self._on_close,
         )
         ws.run_forever()
+
+        # 结束计时，计算指标
+        self.total_time = time.perf_counter() - self._asr_start
+        self.ttft = self._first_result_time
+        if audio_duration > 0:
+            self.rtf = self.total_time / audio_duration
+
         return self.result_text
 
     def _on_open(self, ws, audio_data: bytes, frame_size: int,
@@ -204,7 +301,12 @@ class XunFeiASR:
         ws_list = result.get("ws", [])
         for w in ws_list:
             for cw in w.get("cw", []):
-                self.result_text += cw.get("w", "")
+                word = cw.get("w", "")
+                if word:
+                    # 记录首次识别时间（TTFT）
+                    if self._first_result_time is None:
+                        self._first_result_time = time.perf_counter() - self._asr_start
+                    self.result_text += word
 
         # status=2 表示识别结束
         if data.get("status") == 2:
@@ -239,6 +341,14 @@ class XunFeiTTS:
         self.api_secret = api_secret
         self.audio_data = b""
 
+        # 性能指标
+        self.ttft = None        # 首字节延迟（秒）：从发送请求到收到第一个音频数据
+        self.total_time = None  # 总处理时间（秒）：从开始到合成结束
+        self.rtf = None         # 实时率 = 处理时间 / 音频时长
+        # 内部计时变量
+        self._tts_start = None
+        self._first_audio_time = None
+
     def synthesize(self, text: str,
                    vcn: str = "xiaoyan",
                    speed: int = 50,
@@ -266,6 +376,11 @@ class XunFeiTTS:
             合成的音频二进制数据
         """
         self.audio_data = b""
+        self.ttft = None
+        self.total_time = None
+        self.rtf = None
+        self._first_audio_time = None
+
         url = create_auth_url(self.BASE_URL, self.api_key, self.api_secret)
 
         # 文本 base64 编码
@@ -295,6 +410,9 @@ class XunFeiTTS:
 
         self._request_body = json.dumps(request_body)
 
+        # 开始计时
+        self._tts_start = time.perf_counter()
+
         ws = websocket.WebSocketApp(
             url,
             on_open=self._on_open,
@@ -303,6 +421,23 @@ class XunFeiTTS:
             on_close=self._on_close,
         )
         ws.run_forever()
+
+        # 结束计时，计算指标
+        self.total_time = time.perf_counter() - self._tts_start
+        self.ttft = self._first_audio_time
+
+        # 计算合成音频时长用于 RTF
+        if self.audio_data:
+            if aue == "lame":
+                audio_duration = _estimate_mp3_duration(self.audio_data)
+            elif aue == "raw":
+                sr_match = re.search(r"rate=(\d+)", auf)
+                sr = int(sr_match.group(1)) if sr_match else 16000
+                audio_duration = len(self.audio_data) / (sr * 2)
+            else:
+                audio_duration = 0.0
+            if audio_duration > 0:
+                self.rtf = self.total_time / audio_duration
 
         # 保存到文件
         if self.audio_data and output_file:
@@ -331,6 +466,9 @@ class XunFeiTTS:
 
         audio_b64 = data.get("audio", "")
         if audio_b64:
+            # 记录首次音频数据时间（TTFT）
+            if self._first_audio_time is None:
+                self._first_audio_time = time.perf_counter() - self._tts_start
             self.audio_data += base64.b64decode(audio_b64)
 
         # status=2 表示合成结束
@@ -353,12 +491,18 @@ if __name__ == "__main__":
     print("=" * 50)
     
     asr = XunFeiASR(APP_ID, API_KEY, API_SECRET)
-    test_audio = "cv-test/cv-corpus-25.0-2026-03-09/zh-CN/clips/common_voice_zh-CN_18524189.mp3"  # 替换为你的测试音频文件路径
+    test_audio = "cv-test/cv-corpus-25.0-2026-03-09/zh-CN/clips/common_voice_zh-CN_18524189.mp3"
     # 支持格式: pcm(16k/8k 16bit 单声道) / mp3(仅中英文)
     result = asr.recognize(test_audio,
                            audio_format="audio/L16;rate=16000",
                            encoding="raw")
     print(f"识别结果: {result}")
+    if asr.ttft is not None:
+        print(f"ASR TTFT (首字节延迟): {asr.ttft*1000:.1f} ms")
+    if asr.total_time is not None:
+        print(f"ASR 总耗时: {asr.total_time*1000:.1f} ms")
+    if asr.rtf is not None:
+        print(f"ASR RTF (实时率): {asr.rtf:.4f}")
 
     # ---------- TTS 示例 ----------
     print("=" * 50)
@@ -377,3 +521,9 @@ if __name__ == "__main__":
         output_file="tts_output.mp3",
     )
     print(f"合成音频大小: {len(audio)} bytes")
+    if tts.ttft is not None:
+        print(f"TTS TTFT (首字节延迟): {tts.ttft*1000:.1f} ms")
+    if tts.total_time is not None:
+        print(f"TTS 总耗时: {tts.total_time*1000:.1f} ms")
+    if tts.rtf is not None:
+        print(f"TTS RTF (实时率): {tts.rtf:.4f}")
