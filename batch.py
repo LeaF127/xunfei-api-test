@@ -36,10 +36,11 @@ def try_load_existing(seq, output_asr_dir):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 rec = json.load(f)
-            if rec.get("mode") == "asr" or rec.get("mode") == "all" and rec.get("asr_result") == "":
-                os.remove(path)
-                print(f"  已缓存但 ASR 结果为空，已删除: {path}")
-                return None, False                
+            if rec.get("mode") == "asr" or rec.get("mode") == "all":
+                if rec["asr_result"] == "":
+                    os.remove(path)
+                    print(f"  已缓存但 ASR 结果为空，已删除: {path}")
+                    return None, False                
             
             return rec, True
         except (json.JSONDecodeError, IOError):
