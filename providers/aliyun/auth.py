@@ -109,6 +109,29 @@ class AliyunAuth:
         self._token_expire_time = data["Token"]["ExpireTime"]
         return self._token
 
+    def print_token_sdk(self) -> str:
+        """
+        输出阿里云 SDK Token 
+        """
+        if not HAS_SDK:
+            raise RuntimeError("阿里云 SDK 未安装，请运行: pip install aliyun-python-sdk-core")
+
+        client = AcsClient(
+            self.access_key_id,
+            self.access_key_secret,
+            self.REGION_ID,
+        )
+        request = CommonRequest()
+        request.set_method("POST")
+        request.set_domain(self.DOMAIN)
+        request.set_version(self.VERSION)
+        request.set_action_name(self.ACTION)
+
+        response = client.do_action_with_exception(request)
+
+        print(response)
+
+
     def _get_token_manual(self) -> str:
         """
         手动 HTTP 签名方式获取 Token（SDK 不可用时的后备方案）
@@ -156,3 +179,11 @@ class AliyunAuth:
         except Exception as e:
             print(f"[阿里云] SDK 方式失败，尝试手动签名: {e}")
             return self._get_token_manual()
+
+def main():
+    from config import ALIYUN_ACCESS_KEY_ID, ALIYUN_ACCESS_KEY_SECRET
+    auth = AliyunAuth(ALIYUN_ACCESS_KEY_ID, ALIYUN_ACCESS_KEY_SECRET)
+    auth.print_token_sdk()
+
+if __name__ == "__main__":
+    main()
