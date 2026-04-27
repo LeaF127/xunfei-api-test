@@ -1,6 +1,6 @@
 # asr-tts-benchmark
 
-> 多服务方 ASR（语音识别）+ TTS（语音合成）性能评测工具，使用 [CommonVoice](https://commonvoice.mozilla.org/) 中文数据集。
+> 多服务方 ASR（语音识别）+ TTS（语音合成）性能测试工具，使用 [CommonVoice](https://commonvoice.mozilla.org/) 中文数据集。
 
 ## 支持的服务方
 
@@ -13,7 +13,7 @@
 
 ```
 ├── config.py                     # 统一配置（按服务方前缀读取 .env）
-├── .env.example                  # 环境变量模板
+├── .env.example                  # 环境变量模版
 ├── providers/
 │   ├── base.py                   # BaseASR / BaseTTS 抽象基类
 │   ├── __init__.py               # 工厂函数 get_asr() / get_tts()
@@ -28,8 +28,7 @@
 ├── utils/
 │   ├── audio.py                  # 音频时长估算 + 重采样
 │   └── metrics.py                # CER 编辑距离
-├── batch.py                      # 统一批量评测入口
-├── asr_test.py                   # ASR 单条测试
+├── batch.py                      # 统一批量测试入口
 └── requirements.txt
 ```
 
@@ -65,30 +64,23 @@ ALIYUN_APP_KEY=你的APP_KEY
 > - 讯飞：前往 [讯飞开放平台](https://www.xfyun.cn/) 获取
 > - 阿里云：前往 [阿里云智能语音交互](https://nls-portal.console.aliyun.com/) 获取
 
-### 4. 准备测试数据（可选，批量评测需要）
+### 4. 准备测试数据（可选，批量测试需要）
 
-从 [Mozilla CommonVoice](https://commonvoice.mozilla.org/zh-CN/datasets) 下载中文数据集，放置于 `cv-test/` 目录。
+从 [Mozilla CommonVoice](https://commonvoice.mozilla.org/zh-CN/datasets) 下载中文数据集，置于 `cv-test/` 目录。
 
 ## 使用方法
 
-### ASR 单条测试
+### 批量测试（ASR + TTS）
 
 ```bash
-# 讯飞
-python asr_test.py --provider xunfei --audio test.mp3
+# 同时测试 ASR 和 TTS
+python batch.py --provider xunfei --mode all --limit 400 --workers 2
 
-# 阿里云
-python asr_test.py --provider aliyun --audio test.mp3
-```
+# 仅测试 ASR
+python batch.py --provider xunfei --mode asr --limit 400 --workers 2
 
-### 批量评测（ASR + TTS）
-
-```bash
-# 讯飞
-python batch.py --provider xunfei --limit 400 --workers 2
-
-# 阿里云
-python batch.py --provider aliyun --limit 400 --workers 2
+# 仅测试 TTS
+python batch.py --provider aliyun --mode tts --limit 100 --workers 1
 ```
 
 **参数说明：**
@@ -96,6 +88,7 @@ python batch.py --provider aliyun --limit 400 --workers 2
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `--provider` | 服务方 xunfei / aliyun | `xunfei` |
+| `--mode` | 测试模式 asr / tts / all | `all` |
 | `--data_root` | CommonVoice 数据目录 | `cv-test/...` |
 | `--limit` | 处理条数上限 | `400` |
 | `--output_asr` | ASR 结果目录 | `outputs/<provider>/asr` |
@@ -103,27 +96,51 @@ python batch.py --provider aliyun --limit 400 --workers 2
 | `--voice` | TTS 发音人 | 服务方默认值 |
 | `--workers` | 并发路数 | `2` |
 
+### 增量模式
+
+程序支持增量续跑，已处理的结果会自动跳过：
+
+```
+✅ 加载 400 条数据
+⚡ 服务方: xunfei | 模式: all | 并发: 2
+📦 增量模式: 跳过已缓存 150 条 | 待请求 250 条
+```
+
 ### 在代码中使用
 
 ```python
 from providers import get_asr, get_tts
 
 # ASR
-asr = get_asr("aliyun")
-text = asr.recognize("test.wav", audio_format="wav")
+asr = get_asr("xunfei")
+text = asr.recognize("test.wav")
 print(text)
 
 # TTS
-tts = get_tts("xunfei")
+tts = get_tts("aliyun")
 audio = tts.synthesize("你好世界", output_file="output.mp3")
 ```
 
-## 扩展新的服务方
+## 添加新服务方
 
 1. 在 `providers/` 下创建新目录（如 `providers/tencent/`）
 2. 实现 `auth.py`、`asr.py`、`tts.py`，继承 `BaseASR` / `BaseTTS`
 3. 在 `providers/__init__.py` 的工厂函数中注册
 4. 在 `config.py` 和 `.env.example` 中添加对应的环境变量
+
+## 输出指标
+
+每次请求会记录以下性能指标：
+
+| 指标 | 说明 | 单位 |
+|------|------|------|
+| `ttft` | 首字节延迟：从发送请求到收到首个结果 | 秒 |
+| `total_time` | 总处理时间 | 秒 |
+| `rtf` | 实时率：总耗时 / 音频时长 | 无量纲 |
+
+结果保存在 `outputs/<provider>/asr/` 下：
+- `result_0001.json` - 单条结果
+- `summary.json` / `summary.csv` - 汇总统计
 
 ## 参考文档
 

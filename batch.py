@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-统一批量评测脚本 — 支持 xunfei / aliyun 多服务方
+统一批量测试脚本 — 支持 xunfei / aliyun 多服务方
 用法:
-    python batch.py --provider xunfei --limit 400 --workers 2
-    python batch.py --provider aliyun  --limit 100 --workers 1
+    python batch.py --provider xunfei --mode all --limit 400 --workers 2
+    python batch.py --provider aliyun  --mode asr --limit 100 --workers 1
 """
 
 import os
@@ -14,7 +14,6 @@ import argparse
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-
 import pandas as pd
 
 from providers import get_asr, get_tts
@@ -44,17 +43,18 @@ def try_load_existing(seq, output_asr_dir):
 
 # ---------- 单条处理 ----------
 
-def process_one(provider, seq, total, fname, sentence, audio, tts_out,
+def process_one(provider, mode, seq, total, fname, sentence, audio, tts_out,
                 output_asr_dir):
-    asr_api = get_asr(provider)
-    tts_api = get_tts(provider)
-
+    """
+    处理单条数据（每个线程独立执行）
+    mode: asr | tts | all
+    """
     _sync_print(f"\n[{seq}/{total}] {fname}")
     _sync_print(f"  原文: {sentence}")
 
     rec = {
         "index": seq, "filename": fname, "ground_truth": sentence,
-        "provider": provider,
+        "provider": provider, "mode": mode,
         "asr_result": "", "cer": 1.0,
         "asr_ttft_ms": None, "asr_total_time_ms": None, "asr_rtf": None,
         "tts_ttft_ms": None, "tts_total_time_ms": None, "tts_rtf": None,
@@ -63,48 +63,53 @@ def process_one(provider, seq, total, fname, sentence, audio, tts_out,
     ok = True
 
     # ---- ASR ----
-    if not os.path.exists(audio):
-        _sync_print(f"  ⚠ 音频不存在: {audio}")
-        ok = False
-    else:
-        try:
-            resampled = resample_streaming(audio)
-            if provider == "xunfei":
-                asr_text = asr_api.recognize(resampled)
-            else:
-                asr_text = asr_api.recognize(resampled, audio_format="wav")
-
-            cer = calculate_cer(sentence, asr_text)
-            rec["asr_result"] = asr_text
-            rec["cer"] = round(cer, 4)
-            rec["asr_ttft_ms"]      = round(asr_api.ttft * 1000, 1)  if asr_api.ttft      is not None else None
-            rec["asr_total_time_ms"] = round(asr_api.total_time * 1000, 1) if asr_api.total_time is not None else None
-            rec["asr_rtf"]          = round(asr_api.rtf, 4)           if asr_api.rtf       is not None else None
-        except Exception as e:
-            _sync_print(f"  ❌ ASR 异常: {e}")
+    if mode in ("asr", "all"):
+        if not os.path.exists(audio):
+            _sync_print(f"  ⚠ 音频不存在: {audio}")
             ok = False
+        else:
+            try:
+                asr_api = get_asr(provider)
+                resampled = resample_streaming(audio)
+                if provider == "xunfei":
+                    asr_text = asr_api.recognize(resampled)
+                else:
+                    asr_text = asr_api.recognize(resampled, audio_format="wav")
 
-    _sync_print(f"  识别: {rec['asr_result']}")
-    _sync_print(f"  CER:  {rec['cer']:.4f}")
-    if rec["asr_ttft_ms"] is not None:
-        _sync_print(f"  ASR TTFT: {rec['asr_ttft_ms']:.1f} ms | 总耗时: {rec['asr_total_time_ms']:.1f} ms | RTF: {rec['asr_rtf']:.4f}")
+                cer = calculate_cer(sentence, asr_text)
+                rec["asr_result"] = asr_text
+                rec["cer"] = round(cer, 4)
+                rec["asr_ttft_ms"]      = round(asr_api.ttft * 1000, 1)  if asr_api.ttft      is not None else None
+                rec["asr_total_time_ms"] = round(asr_api.total_time * 1000, 1) if asr_api.total_time is not None else None
+                rec["asr_rtf"]          = round(asr_api.rtf, 4)           if asr_api.rtf       is not None else None
+            except Exception as e:
+                _sync_print(f"  ❌ ASR 异常: {e}")
+                ok = False
+
+        if rec["asr_result"]:
+            _sync_print(f"  识别: {rec['asr_result']}")
+            _sync_print(f"  CER:  {rec['cer']:.4f}")
+            if rec["asr_ttft_ms"] is not None:
+                _sync_print(f"  ASR TTFT: {rec['asr_ttft_ms']:.1f} ms | 总耗时: {rec['asr_total_time_ms']:.1f} ms | RTF: {rec['asr_rtf']:.4f}")
 
     # ---- TTS ----
-    try:
-        r = tts_api.synthesize(sentence, output_file=tts_out)
-        rec["tts_ttft_ms"]      = round(tts_api.ttft * 1000, 1)  if tts_api.ttft      is not None else None
-        rec["tts_total_time_ms"] = round(tts_api.total_time * 1000, 1) if tts_api.total_time is not None else None
-        rec["tts_rtf"]          = round(tts_api.rtf, 4)           if tts_api.rtf       is not None else None
-        if r:
-            _sync_print(f"  ✅ TTS → {tts_out}")
-            if rec["tts_ttft_ms"] is not None:
-                _sync_print(f"  TTS TTFT: {rec['tts_ttft_ms']:.1f} ms | 总耗时: {rec['tts_total_time_ms']:.1f} ms | RTF: {rec['tts_rtf']:.4f}")
-        else:
-            _sync_print(f"  ❌ TTS 合成失败")
+    if mode in ("tts", "all"):
+        try:
+            tts_api = get_tts(provider)
+            r = tts_api.synthesize(sentence, output_file=tts_out)
+            rec["tts_ttft_ms"]      = round(tts_api.ttft * 1000, 1)  if tts_api.ttft      is not None else None
+            rec["tts_total_time_ms"] = round(tts_api.total_time * 1000, 1) if tts_api.total_time is not None else None
+            rec["tts_rtf"]          = round(tts_api.rtf, 4)           if tts_api.rtf       is not None else None
+            if r:
+                _sync_print(f"  ✅ TTS → {tts_out}")
+                if rec["tts_ttft_ms"] is not None:
+                    _sync_print(f"  TTS TTFT: {rec['tts_ttft_ms']:.1f} ms | 总耗时: {rec['tts_total_time_ms']:.1f} ms | RTF: {rec['tts_rtf']:.4f}")
+            else:
+                _sync_print(f"  ❌ TTS 合成失败")
+                ok = False
+        except Exception as e:
+            _sync_print(f"  ❌ TTS 异常: {e}")
             ok = False
-    except Exception as e:
-        _sync_print(f"  ❌ TTS 异常: {e}")
-        ok = False
 
     time.sleep(0.1)
 
@@ -116,9 +121,11 @@ def process_one(provider, seq, total, fname, sentence, audio, tts_out,
 # ---------- 主流程 ----------
 
 def main():
-    ap = argparse.ArgumentParser(description="ASR + TTS 批量评测")
+    ap = argparse.ArgumentParser(description="ASR + TTS 批量测试")
     ap.add_argument("--provider",  default="xunfei", choices=["xunfei", "aliyun"],
                     help="服务方 (xunfei / aliyun)")
+    ap.add_argument("--mode",      default="all", choices=["asr", "tts", "all"],
+                    help="测试模式: asr(仅ASR) / tts(仅TTS) / all(ASR+TTS)")
     ap.add_argument("--data_root",  default="cv-test/cv-corpus-25.0-2026-03-09/zh-CN_subset_5000",
                     help="数据集目录路径")
     ap.add_argument("--limit",      type=int, default=400, help="处理条数上限")
@@ -129,6 +136,7 @@ def main():
     args = ap.parse_args()
 
     provider = args.provider
+    mode     = args.mode
     out_asr = args.output_asr or f"outputs/{provider}/asr"
     out_tts = args.output_tts or f"outputs/{provider}/tts"
 
@@ -140,14 +148,14 @@ def main():
 
     df = pd.read_csv(tsv_path, sep="\t").head(args.limit)
     print(f"✅ 加载 {len(df)} 条数据  (TSV: {tsv_path})")
-    print(f"⚡ 服务方: {provider} | 并发路数: {args.workers}")
+    print(f"⚡ 服务方: {provider} | 模式: {mode} | 并发: {args.workers}")
 
     os.makedirs(out_asr, exist_ok=True)
     os.makedirs(out_tts, exist_ok=True)
 
     total = len(df)
 
-    # 增量模式
+    # 增量模式：区分已缓存 / 待请求
     cached_results = []
     pending_tasks  = []
     skipped = 0
@@ -160,11 +168,12 @@ def main():
         tts_out  = os.path.join(out_tts, fname)
 
         rec, hit = try_load_existing(seq, out_asr)
-        if hit:
+        # 如果缓存的 mode 和当前一致，则跳过；否则重新请求
+        if hit and rec.get("mode") == mode:
             cached_results.append(rec)
             skipped += 1
         else:
-            pending_tasks.append((provider, seq, total, fname, sentence, audio, tts_out, out_asr))
+            pending_tasks.append((provider, mode, seq, total, fname, sentence, audio, tts_out, out_asr))
 
     new_count = len(pending_tasks)
     print(f"📦 增量模式: 跳过已缓存 {skipped} 条 | 待请求 {new_count} 条")
@@ -175,7 +184,7 @@ def main():
     if new_count > 0:
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             futures = {
-                executor.submit(process_one, *task): task[1]
+                executor.submit(process_one, *task): task[2]
                 for task in pending_tasks
             }
             for future in as_completed(futures):
@@ -203,7 +212,7 @@ def main():
     summary = {
         "total": len(results), "success": ok_count + skipped, "fail": fail_count,
         "cached": skipped, "new_processed": new_count,
-        "provider": provider, "workers": args.workers,
+        "provider": provider, "mode": mode, "workers": args.workers,
         "average_cer": round(avg_cer, 4),
         "average_asr_ttft_ms":      round(_avg("asr_ttft_ms"), 1)       if _avg("asr_ttft_ms")      is not None else None,
         "average_asr_total_time_ms": round(_avg("asr_total_time_ms"), 1) if _avg("asr_total_time_ms") is not None else None,
@@ -222,7 +231,7 @@ def main():
 
     print(f"\n{'='*50}")
     print(f"🎉 完成！  总计 {len(results)} | 缓存 {skipped} | 新请求 {new_count} | 失败 {fail_count} | 平均CER {avg_cer:.4f}")
-    print(f"   服务方: {provider} | 并发: {args.workers}")
+    print(f"   服务方: {provider} | 模式: {mode} | 并发: {args.workers}")
     if _avg("asr_ttft_ms") is not None:
         print(f"   ASR 平均 TTFT: {_avg('asr_ttft_ms'):.1f} ms | 平均 RTF: {_avg('asr_rtf'):.4f}")
     if _avg("tts_ttft_ms") is not None:
