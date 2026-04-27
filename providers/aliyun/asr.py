@@ -1,31 +1,30 @@
 """
-阿里云语音识别（ASR）- WebSocket 版
+阿里云语音识别（ASR）- RESTful API
 
-文档: https://help.aliyun.com/zh/isi/developer-reference/api-reference-1
+文档: https://help.aliyun.com/zh/isi/developer-reference/restful-api-1
 
-交互流程:
-  1. 建立 WebSocket 连接（wss://nls-gateway-ap-southeast-1.aliyuncs.com/ws/v1）
-     握手时带 X-NLS-Token header
-  2. 发送 StartRecognition 消息（含 appkey、format、sample_rate 等）
-  3. 发送 SendAudio 消息（分块发送音频，base64 编码）
-  4. 发送最后一帧（status=2）
-  5. 接收 RecognitionCompleted 消息（含最终识别结果）
+交互流程：
+  1. 构造 HTTP POST 请求，URL 包含 appkey/format/sample_rate 等参数
+  2. Header 携带 X-NLS-Token 鉴权
+  3. Body 直接发送音频二进制数据（application/octet-stream）
+  4. 解析 JSON 响应获取识别结果
 """
 
-import base64
 import json
 import time
-import websocket
+import http.client
 
 from providers.base import BaseASR
 from providers.aliyun.auth import AliyunAuth
 
-WS_URL = "wss://nls-gateway-ap-southeast-1.aliyuncs.com/ws/v1"
+# RESTful 服务地址
+HOST = "nls-gateway-ap-southeast-1.aliyuncs.com"
+ASR_URL = "/stream/v1/asr"
 
 
 class AliASR(BaseASR):
     """
-    阿里云一句话识别（WebSocket 版）
+    阿里云一句话识别（RESTful API）
     """
 
     def __init__(self, access_key_id: str, access_key_secret: str, app_key: str):
@@ -44,7 +43,7 @@ class AliASR(BaseASR):
                   sample_rate: int = 16000,
                   enable_punctuation: bool = False,
                   enable_inverse_text_normalization: bool = True) -> str:
-        """WebSocket 一句话识别"""
+        """RESTful 一句话识别"""
         self.result_text = ""
         self.ttft = None
         self.total_time = None
@@ -62,91 +61,52 @@ class AliASR(BaseASR):
         audio_duration = len(audio_data) / (sample_rate * 2) if audio_format == "pcm" else 0
         token = self.auth.get_token()
 
+        # 构造请求 URL（参数拼接）
+        request_url = f"{ASR_URL}?appkey={self.app_key}"
+        request_url += f"&format={audio_format}"
+        request_url += f"&sample_rate={sample_rate}"
+
+        if enable_punctuation:
+            request_url += "&enable_punctuation_prediction=true"
+
+        if enable_inverse_text_normalization:
+            request_url += "&enable_inverse_text_normalization=true"
+
+        # 设置 HTTP 请求头
+        http_headers = {
+            "X-NLS-Token": token,
+            "Content-Type": "application/octet-stream",
+            "Content-Length": len(audio_data),
+        }
+
+        # 开始计时
         start_time = time.perf_counter()
-        first_result_time = None
 
-        # 建立 WebSocket 连接（带 X-NLS-Token header 鉴权）
-        ws = websocket.create_connection(WS_URL, header={"X-NLS-Token": token})
+        # 发送 HTTP POST 请求
+        conn = http.client.HTTPConnection(HOST)
+        conn.request(method="POST", url=request_url, body=audio_data, headers=http_headers)
 
-        try:
-            # 1. 发送 StartRecognition（必须含 appkey）
-            ws.send(json.dumps({
-                "header": {
-                    "namespace": "SpeechRecognizer",
-                    "name": "StartRecognition",
-                    "appkey": self.app_key,
-                    "message_id": str(int(time.time_ns())),
-                    "status": 20000000,
-                    "status_text": "Gateway:Success:Success."
-                },
-                "payload": {
-                    "format": audio_format.upper(),
-                    "sample_rate": sample_rate,
-                    "enable_intermediate_result": False,
-                    "enable_punctuation_prediction": enable_punctuation,
-                    "enable_inverse_text_normalization": enable_inverse_text_normalization,
-                }
-            }))
-
-            # 等待服务端确认
-            resp = json.loads(ws.recv())
-            hdr = resp.get("header", {})
-            if hdr.get("name") == "TaskFailed":
-                raise RuntimeError(f"StartRecognition 失败: {resp}")
-
-            # 2. 分块发送音频（base64）
-            audio_b64 = base64.b64encode(audio_data).decode("utf-8")
-            chunk_size = 3200
-            offset = 0
-            task_id = hdr.get("task_id", "")
-
-            while offset < len(audio_b64):
-                is_last = (offset + chunk_size >= len(audio_b64))
-                chunk = audio_b64[offset:offset + chunk_size]
-
-                ws.send(json.dumps({
-                    "header": {
-                        "namespace": "SpeechRecognizer",
-                        "name": "SendAudio",
-                        "appkey": self.app_key,
-                        "task_id": task_id,
-                        "message_id": str(int(time.time_ns())),
-                        "status": 20000000,
-                        "status_text": "Gateway:Success:Success."
-                    },
-                    "payload": {
-                        "audio": chunk,
-                        "status": 2 if is_last else 1
-                    }
-                }))
-                offset += chunk_size
-                if not is_last:
-                    time.sleep(0.04)
-
-            # 3. 等待最终识别结果
-            ws.settimeout(30)
-            while True:
-                msg = ws.recv()
-                data = json.loads(msg)
-                name = data.get("header", {}).get("name", "")
-
-                if name == "RecognitionResultChanged" and first_result_time is None:
-                    first_result_time = time.perf_counter() - start_time
-
-                if name == "RecognitionCompleted":
-                    self.result_text = data.get("payload", {}).get("result", "")
-                    if first_result_time is None:
-                        first_result_time = time.perf_counter() - start_time
-                    break
-
-                if name == "TaskFailed":
-                    raise RuntimeError(f"ASR 失败: {data}")
-
-        finally:
-            ws.close()
+        response = conn.getresponse()
+        body = response.read()
 
         self.total_time = time.perf_counter() - start_time
-        self.ttft = first_result_time
+        self.ttft = self.total_time  # RESTful 是一次性返回，TTFT = 总耗时
+
+        conn.close()
+
+        # 解析响应
+        if response.status != 200:
+            raise RuntimeError(f"HTTP 请求失败: {response.status} {response.reason}")
+
+        data = json.loads(body)
+        status = data.get("status", -1)
+
+        if status == 20000000:
+            self.result_text = data.get("result", "")
+        else:
+            raise RuntimeError(f"识别失败: status={status}, message={data}")
+
+        # 计算 RTF
         if audio_duration > 0:
             self.rtf = self.total_time / audio_duration
 
