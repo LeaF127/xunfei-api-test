@@ -70,8 +70,12 @@ class DoubaoASR(BaseASR):
         """
         解析服务端响应帧
 
+        所有消息类型（包括 0x0F 错误）统一使用:
+          header(4) + payload_size(4) + payload
+        payload 可能经过 gzip 压缩和 JSON 序列化。
+
         Returns:
-            {"msg_type": int, "payload": dict|bytes}
+            {"msg_type": int, "payload": dict}
         """
         if len(data) < 4:
             return {"msg_type": -1, "payload": {}}
@@ -80,15 +84,7 @@ class DoubaoASR(BaseASR):
         serialization = (data[2] >> 4) & 0x0F
         compression = (data[2]) & 0x0F
 
-        if msg_type == 0x0F:
-            # Error message from server: header(4) + error_code(4) + error_size(4) + error_msg
-            if len(data) >= 12:
-                error_code = struct.unpack(">I", data[4:8])[0]
-                error_size = struct.unpack(">I", data[8:12])[0]
-                error_msg = data[12:12 + error_size].decode("utf-8", errors="replace")
-                return {"msg_type": msg_type, "payload": {"code": error_code, "message": error_msg}}
-            return {"msg_type": msg_type, "payload": {"code": -1, "message": "unknown error"}}
-
+        # 所有消息类型统一格式: header(4) + payload_size(4) + payload
         if len(data) < 8:
             return {"msg_type": msg_type, "payload": {}}
 
@@ -97,16 +93,21 @@ class DoubaoASR(BaseASR):
 
         # 解压
         if compression == 1 and payload_raw:
-            payload_raw = gzip.decompress(payload_raw)
+            try:
+                payload_raw = gzip.decompress(payload_raw)
+            except Exception:
+                pass  # 解压失败则保留原始数据
 
         # 反序列化
         if serialization == 1 and payload_raw:
             try:
                 payload = json.loads(payload_raw.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
-                payload = {"raw": payload_raw}
-        else:
+                payload = {"raw": payload_raw[:200]}
+        elif payload_raw:
             payload = {"raw_size": len(payload_raw)}
+        else:
+            payload = {}
 
         return {"msg_type": msg_type, "payload": payload}
 
@@ -116,7 +117,6 @@ class DoubaoASR(BaseASR):
                             sample_rate: int = 16000,
                             bits: int = 16,
                             channel: int = 1,
-                            sequence: int = 1,
                             use_gzip: bool = True) -> bytes:
         """
         构造 full_client_request 帧（JSON 配置，不含音频）
@@ -129,7 +129,7 @@ class DoubaoASR(BaseASR):
         config = {
             "app": {
                 "appid": self.appid,
-                "token": "access_token",  # 必填，填任意非空值即可
+                "token": "access_token",
                 "cluster": self.cluster,
             },
             "user": {
@@ -143,7 +143,7 @@ class DoubaoASR(BaseASR):
             },
             "request": {
                 "reqid": reqid,
-                "sequence": sequence,
+                "sequence": 1,
                 "nbest": 1,
                 "workflow": "audio_in,resample,partition,vad,fe,decode",
             },
@@ -248,7 +248,6 @@ class DoubaoASR(BaseASR):
                 config_frame = self._build_config_frame(
                     audio_format=audio_format,
                     sample_rate=sample_rate,
-                    sequence=-1,  # 一句话识别，只有一包
                     use_gzip=True,
                 )
                 ws.send_binary(config_frame)
@@ -257,12 +256,13 @@ class DoubaoASR(BaseASR):
                 ack_data = ws.recv()
                 if isinstance(ack_data, bytes):
                     ack = self._parse_response(ack_data)
-                    if ack["msg_type"] == 0x0F:
-                        raise RuntimeError(f"ASR 配置阶段服务端错误: {ack['payload']}")
                     ack_payload = ack.get("payload", {})
-                    if isinstance(ack_payload, dict) and ack_payload.get("code", 1000) != 1000:
-                        raise RuntimeError(f"ASR 配置阶段错误: code={ack_payload.get('code')}, "
-                                           f"message={ack_payload.get('message')}")
+                    code = ack_payload.get("code", 1000) if isinstance(ack_payload, dict) else -1
+                    if code != 1000:
+                        raise RuntimeError(
+                            f"ASR 配置阶段错误: code={code}, "
+                            f"message={ack_payload.get('message', '')}"
+                        )
                     self.ttft = time.perf_counter() - start
 
                 # ---- Step 3: 发送 audio_only_request (音频数据, 最后一包) ----
@@ -284,27 +284,25 @@ class DoubaoASR(BaseASR):
                     msg_type = resp["msg_type"]
                     payload = resp["payload"]
 
-                    if msg_type == 0x0F:
-                        raise RuntimeError(f"ASR 识别阶段服务端错误: {payload}")
+                    if not isinstance(payload, dict):
+                        continue
 
-                    if msg_type == 0x09:
-                        # full_server_response
-                        if isinstance(payload, dict):
-                            code = payload.get("code", -1)
-                            if code != 1000:
-                                raise RuntimeError(
-                                    f"ASR 错误: code={code}, message={payload.get('message', '')}"
-                                )
-                            # 提取识别文本
-                            results = payload.get("result", [])
-                            for item in results:
-                                if "text" in item:
-                                    result_text = item["text"]
+                    code = payload.get("code", -1)
+                    if code != 1000:
+                        raise RuntimeError(
+                            f"ASR 错误: code={code}, message={payload.get('message', '')}"
+                        )
 
-                            # sequence 为负数表示最后一包结果
-                            seq = payload.get("sequence", 0)
-                            if seq < 0:
-                                break
+                    # 提取识别文本
+                    results = payload.get("result", [])
+                    for item in results:
+                        if "text" in item:
+                            result_text = item["text"]
+
+                    # sequence 为负数表示最后一包结果
+                    seq = payload.get("sequence", 0)
+                    if seq < 0:
+                        break
 
                 self.total_time = time.perf_counter() - start
                 if self.ttft is None:
