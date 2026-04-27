@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-讯飞 ASR / TTS 批量处理脚本（多路并发版）
+讯飞 ASR / TTS 批量处理脚本（多路并发 + 增量续跑）
 """
 
 import os, sys, json, time, argparse, threading
@@ -44,6 +44,23 @@ _print_lock = threading.Lock()
 def _sync_print(*args, **kwargs):
     with _print_lock:
         print(*args, **kwargs)
+
+# ---------- 增量：尝试加载已有结果 ----------
+
+def try_load_existing(seq, output_asr_dir):
+    """
+    尝试读取已有的单条结果 JSON
+    返回 (rec, True) 表示命中缓存，(None, False) 表示需要重新请求
+    """
+    path = os.path.join(output_asr_dir, f"result_{seq:04d}.json")
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                rec = json.load(f)
+            return rec, True
+        except (json.JSONDecodeError, IOError):
+            return None, False
+    return None, False
 
 # ---------- 单条处理 ----------
 
@@ -147,39 +164,54 @@ def main():
     os.makedirs(args.output_tts, exist_ok=True)
 
     total = len(df)
-    results = []
-    ok_count, fail_count = 0, 0
 
-    # 构建任务列表
-    tasks = []
+    # ---- 增量：区分已缓存 / 待请求 ----
+    cached_results = []   # 已有的旧结果
+    pending_tasks  = []   # 需要请求的任务
+    skipped = 0
+
     for i, row in df.iterrows():
         fname    = row["path"]
         sentence = row["sentence"]
         audio    = os.path.join(clips_dir, fname)
         seq      = i + 1
         tts_out  = os.path.join(args.output_tts, fname)
-        tasks.append((seq, total, fname, sentence, audio, tts_out, args.output_asr))
 
-    # 多路并发执行
-    with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = {
-            executor.submit(process_one, *task): task[0]
-            for task in tasks
-        }
-        for future in as_completed(futures):
-            seq = futures[future]
-            try:
-                rec, ok = future.result()
-                results.append(rec)
-                if ok:
-                    ok_count += 1
-                else:
+        rec, hit = try_load_existing(seq, args.output_asr)
+        if hit:
+            cached_results.append(rec)
+            skipped += 1
+        else:
+            pending_tasks.append((seq, total, fname, sentence, audio, tts_out, args.output_asr))
+
+    new_count = len(pending_tasks)
+    print(f"📦 增量模式: 跳过已缓存 {skipped} 条 | 待请求 {new_count} 条")
+
+    # ---- 多路并发执行新任务 ----
+    new_results = []
+    ok_count, fail_count = 0, 0
+
+    if new_count > 0:
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = {
+                executor.submit(process_one, *task): task[0]
+                for task in pending_tasks
+            }
+            for future in as_completed(futures):
+                seq = futures[future]
+                try:
+                    rec, ok = future.result()
+                    new_results.append(rec)
+                    if ok:
+                        ok_count += 1
+                    else:
+                        fail_count += 1
+                except Exception as e:
+                    _sync_print(f"  ❌ [{seq}] 执行异常: {e}")
                     fail_count += 1
-            except Exception as e:
-                _sync_print(f"  ❌ [{seq}] 执行异常: {e}")
-                fail_count += 1
 
-    # 按 index 排序，保证输出顺序
+    # ---- 合并结果（旧 + 新），按 index 排序 ----
+    results = cached_results + new_results
     results.sort(key=lambda r: r["index"])
 
     # ---- 汇总 ----
@@ -190,7 +222,8 @@ def main():
         return sum(vals) / len(vals) if vals else None
 
     summary = {
-        "total": len(results), "success": ok_count, "fail": fail_count,
+        "total": len(results), "success": ok_count + skipped, "fail": fail_count,
+        "cached": skipped, "new_processed": new_count,
         "workers": args.workers,
         "average_cer": round(avg_cer, 4),
         "average_asr_ttft_ms":      round(_avg("asr_ttft_ms"), 1)       if _avg("asr_ttft_ms")      is not None else None,
@@ -209,7 +242,7 @@ def main():
                                   index=False, encoding="utf-8-sig")
 
     print(f"\n{'='*50}")
-    print(f"🎉 完成！  总计 {len(results)} | 成功 {ok_count} | 失败 {fail_count} | 平均CER {avg_cer:.4f}")
+    print(f"🎉 完成！  总计 {len(results)} | 缓存 {skipped} | 新请求 {new_count} | 失败 {fail_count} | 平均CER {avg_cer:.4f}")
     print(f"   并发路数: {args.workers}")
     if _avg("asr_ttft_ms") is not None:
         print(f"   ASR 平均 TTFT: {_avg('asr_ttft_ms'):.1f} ms | 平均 RTF: {_avg('asr_rtf'):.4f}")
