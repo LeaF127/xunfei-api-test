@@ -58,13 +58,24 @@ class AliASR(BaseASR):
         else:
             raise TypeError("audio_file_path 必须是文件路径(str)或音频数据(bytes)")
 
-        audio_duration = len(audio_data) / (sample_rate * 2) if audio_format == "pcm" else 0
+        if not audio_data:
+            raise ValueError("音频数据为空")
+
+        # 估算音频时长（WAV 格式需要减去 header 大小）
+        if audio_format == "pcm":
+            audio_duration = len(audio_data) / (sample_rate * 2)
+        elif audio_format == "wav":
+            # WAV 有 44 字节 header
+            audio_duration = max(0, (len(audio_data) - 44)) / (sample_rate * 2)
+        else:
+            audio_duration = 0
+
         token = self.auth.get_token()
 
-        # 构造请求 URL（参数拼接）
+        # 构造请求 URL（参数拼接，严格按照官方示例）
         request_url = f"{ASR_URL}?appkey={self.app_key}"
         request_url += f"&format={audio_format}"
-        request_url += f"&sample_rate={sample_rate}"
+        request_url += f"&sample_rate={str(sample_rate)}"
 
         if enable_punctuation:
             request_url += "&enable_punctuation_prediction=true"
@@ -72,11 +83,15 @@ class AliASR(BaseASR):
         if enable_inverse_text_normalization:
             request_url += "&enable_inverse_text_normalization=true"
 
+        # 调试：打印请求信息
+        print(f"[阿里云ASR] Request URL: {request_url}")
+        print(f"[阿里云ASR] Audio size: {len(audio_data)} bytes, format: {audio_format}, sample_rate: {sample_rate}")
+
         # 设置 HTTP 请求头
         http_headers = {
             "X-NLS-Token": token,
             "Content-Type": "application/octet-stream",
-            "Content-Length": len(audio_data),
+            "Content-Length": str(len(audio_data)),
         }
 
         # 开始计时
@@ -95,8 +110,20 @@ class AliASR(BaseASR):
         conn.close()
 
         # 解析响应
+        print(f"[阿里云ASR] Response: {response.status} {response.reason}")
+        print(f"[阿里云ASR] Body: {body[:500]}")
+
         if response.status != 200:
-            raise RuntimeError(f"HTTP 请求失败: {response.status} {response.reason}")
+            try:
+                error_data = json.loads(body)
+                raise RuntimeError(
+                    f"HTTP {response.status} {response.reason}: "
+                    f"task_id={error_data.get('task_id')}, "
+                    f"status={error_data.get('status')}, "
+                    f"message={error_data.get('message', '')}"
+                )
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                raise RuntimeError(f"HTTP {response.status} {response.reason}: {body}")
 
         data = json.loads(body)
         status = data.get("status", -1)
@@ -104,7 +131,7 @@ class AliASR(BaseASR):
         if status == 20000000:
             self.result_text = data.get("result", "")
         else:
-            raise RuntimeError(f"识别失败: status={status}, message={data}")
+            raise RuntimeError(f"识别失败: status={status}, message={data.get('message', '')}, response={data}")
 
         # 计算 RTF
         if audio_duration > 0:
