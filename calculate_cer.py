@@ -105,7 +105,7 @@ def calculate_directory_cer(directory: str):
 def main():
     ap = argparse.ArgumentParser(description="批量计算 CER（字错误率）")
     ap.add_argument("--dir", default=None, help="结果目录路径（默认：outputs/xunfei/asr）")
-    ap.add_argument("--provider", default="xunfei", choices=["xunfei", "aliyun"], help="服务方（用于设置默认目录）")
+    ap.add_argument("--provider", default="xunfei", choices=["xunfei", "aliyun", "doubao"], help="服务方（用于设置默认目录）")
     ap.add_argument("--output", default="cer_results.json", help="输出文件路径（默认 cer_results.json）")
     ap.add_argument("--format", choices=["json", "csv"], default="json", help="输出格式（默认 json）")
     args = ap.parse_args()
