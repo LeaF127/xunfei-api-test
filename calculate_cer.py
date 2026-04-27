@@ -4,8 +4,8 @@
 
 用法：
     python calculate_cer.py --dir outputs/xunfei/asr
-    python calculate_cer.py --dir outputs/xunfei/asr --output cer_results.json
-    python calculate_cer.py --dir outputs/xunfei/asr --format csv
+    python calculate_cer.py --dir outputs/aliyun/asr --output cer_results.json
+    python calculate_cer.py --dir outputs/aliyun/asr --format csv
 
 输出格式：
   JSON: cer_results.json
@@ -34,6 +34,7 @@ def _normalize_text(text: str) -> str:
     if not text:
         return ""
     # 去除标点：保留中文、字母、数字
+    # 正则匹配非中文、非字母数字的字符（包括标点和空格）
     text = re.sub(r'[^\w\u4e00-\u9fff]', '', text)
     # 转换为小写
     text = text.lower()
@@ -53,7 +54,7 @@ def load_json_files(directory: str):
     dir_path = Path(directory)
     if not dir_path.exists():
         raise FileNotFoundError(f"目录不存在: {directory}")
-    
+
     for json_file in sorted(dir_path.glob("*.json")):
         # 跳过 summary.json
         if json_file.name == "summary.json":
@@ -103,10 +104,16 @@ def calculate_directory_cer(directory: str):
 
 def main():
     ap = argparse.ArgumentParser(description="批量计算 CER（字错误率）")
-    ap.add_argument("--dir", required=True, help="结果目录路径")
+    ap.add_argument("--dir", default=None, help="结果目录路径（默认：outputs/xunfei/asr）")
+    ap.add_argument("--provider", default="xunfei", choices=["xunfei", "aliyun"], help="服务方（用于设置默认目录）")
     ap.add_argument("--output", default="cer_results.json", help="输出文件路径（默认 cer_results.json）")
     ap.add_argument("--format", choices=["json", "csv"], default="json", help="输出格式（默认 json）")
     args = ap.parse_args()
+    
+    # 设置默认目录
+    if args.dir is None:
+        args.dir = f"outputs/{args.provider}/asr"
+        print(f"ℹ 未指定目录，使用默认目录: {args.dir}")
     
     print(f"📂 开始处理目录: {args.dir}")
     
@@ -126,6 +133,7 @@ def main():
     # 准备输出数据
     summary = {
         "directory": args.dir,
+        "provider": args.provider,
         "total_files": len(results),
         "average_cer": round(avg_cer, 4),
         "max_cer": round(max_cer, 4),
