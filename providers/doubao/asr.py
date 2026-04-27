@@ -238,7 +238,7 @@ class DoubaoASR(BaseASR):
             ws = websocket.WebSocket()
             ws.connect(
                 self.WS_URL,
-                header=list(auth_headers.items()),
+                header=[f"{k}: {v}" for k, v in auth_headers.items()],
                 max_size=10 * 1024 * 1024,
                 timeout=30,
             )
