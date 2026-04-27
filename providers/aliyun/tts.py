@@ -1,7 +1,25 @@
-"""阿里云语音合成 (TTS) — RESTful API"""
+"""阿里云语音合成 (TTS) — RESTful API
+
+文档: https://help.aliyun.com/zh/isi/developer-reference/restful-api-3
+
+接口要求:
+  协议:    HTTPS
+  地址:    https://nls-gateway-cn-shanghai.aliyuncs.com/stream/v1/tts
+  方法:    GET / POST
+  格式:    pcm / wav / mp3
+  文本:    单次 <= 300 字
+
+POST 请求:
+  Content-Type: application/json
+  Body: {"appkey":"...","token":"...","text":"...","format":"wav","sample_rate":16000}
+
+成功响应:
+  Content-Type: audio/mpeg
+  Body: 音频二进制数据
+"""
 
 import time
-from urllib.parse import quote
+import urllib.parse
 
 import requests
 
@@ -12,13 +30,7 @@ from utils.audio import estimate_mp3_duration
 
 class AliTTS(BaseTTS):
     """
-    阿里云智能语音交互 — 语音合成
-
-    接口要求:
-      协议:    HTTPS (RESTful)
-      地址:    https://nls-gateway-cn-shanghai.aliyuncs.com/stream/v1/tts
-      格式:    pcm / wav / mp3
-      文本:    单次 <= 300 字
+    阿里云智能语音交互 — 语音合成（RESTful API）
     """
 
     GATEWAY_URL = "https://nls-gateway-cn-shanghai.aliyuncs.com/stream/v1/tts"
@@ -29,7 +41,7 @@ class AliTTS(BaseTTS):
         self.app_key = app_key
 
     def synthesize(self, text: str,
-                   voice: str = "zhixiaoxia",
+                   voice: str = "xiaoyun",
                    volume: int = 50,
                    speech_rate: int = 0,
                    pitch_rate: int = 0,
@@ -37,11 +49,11 @@ class AliTTS(BaseTTS):
                    sample_rate: int = 16000,
                    output_file: str = None) -> bytes:
         """
-        合成语音
+        合成语音（使用 POST 方法）
 
         Args:
-            text: 要合成的文本
-            voice: 发音人 (zhixiaoxia, zhixiaoyun, zhiyan_emo 等)
+            text: 要合成的文本（UTF-8 编码，不超过 300 字）
+            voice: 发音人 (xiaoyun, xiaoyan, zhiyan_emo 等)
             volume: 音量 [0-100]
             speech_rate: 语速 [-500, 500]
             pitch_rate: 音高 [-500, 500]
@@ -57,30 +69,36 @@ class AliTTS(BaseTTS):
 
         token = self.auth.get_token()
 
-        url = (
-            f"{self.GATEWAY_URL}"
-            f"?appkey={self.app_key}"
-            f"&text={quote(text)}"
-            f"&format={audio_format}"
-            f"&sample_rate={sample_rate}"
-            f"&voice={voice}"
-            f"&volume={volume}"
-            f"&speech_rate={speech_rate}"
-            f"&pitch_rate={pitch_rate}"
-        )
+        # POST 方法: 参数以 JSON 格式放在 Body 中
+        body = {
+            "appkey": self.app_key,
+            "token": token,
+            "text": text,
+            "format": audio_format,
+            "sample_rate": sample_rate,
+            "voice": voice,
+            "volume": volume,
+            "speech_rate": speech_rate,
+            "pitch_rate": pitch_rate,
+        }
 
         headers = {
-            "X-NLS-Token": token,
-            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Type": "application/json",
         }
 
         start = time.perf_counter()
-        response = requests.post(url, headers=headers, timeout=30)
+        response = requests.post(
+            self.GATEWAY_URL,
+            json=body,
+            headers=headers,
+            timeout=30,
+        )
         self.total_time = time.perf_counter() - start
 
         content_type = response.headers.get("Content-Type", "")
 
-        if "audio" in content_type or "octet-stream" in content_type:
+        # 成功: Content-Type 为 audio/mpeg
+        if "audio/mpeg" in content_type or "audio" in content_type:
             audio_data = response.content
             self.ttft = self.total_time
 
