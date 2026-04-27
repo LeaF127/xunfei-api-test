@@ -36,6 +36,12 @@ def try_load_existing(seq, output_asr_dir):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 rec = json.load(f)
+            if rec.get("mode") == "asr" or rec.get("mode") == "all":
+                if rec["asr_result"] == "":
+                    os.remove(path)
+                    print(f"  已缓存但 ASR 结果为空，已删除: {path}")
+                    return None, False                
+            
             return rec, True
         except (json.JSONDecodeError, IOError):
             return None, False
@@ -75,7 +81,10 @@ def process_one(provider, mode, seq, total, fname, sentence, audio, tts_out,
                     asr_text = asr_api.recognize(resampled)
                 else:
                     asr_text = asr_api.recognize(resampled, audio_format="wav")
-
+                    
+                if asr_text is None:
+                    raise ValueError("ASR 返回空结果")
+                   
                 cer = calculate_cer(sentence, asr_text)
                 rec["asr_result"] = asr_text
                 rec["cer"] = round(cer, 4)
@@ -113,8 +122,9 @@ def process_one(provider, mode, seq, total, fname, sentence, audio, tts_out,
 
     time.sleep(0.1)
 
-    with open(os.path.join(output_asr_dir, f"result_{seq:04d}.json"), "w", encoding="utf-8") as f:
-        json.dump(rec, f, ensure_ascii=False, indent=2)
+    if rec["asr_result"] is not None:
+        with open(os.path.join(output_asr_dir, f"result_{seq:04d}.json"), "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=2)
 
     return rec, ok
 
@@ -122,17 +132,17 @@ def process_one(provider, mode, seq, total, fname, sentence, audio, tts_out,
 
 def main():
     ap = argparse.ArgumentParser(description="ASR + TTS 批量测试")
-    ap.add_argument("--provider",  default="xunfei", choices=["xunfei", "aliyun"],
+    ap.add_argument("--provider",  default="xunfei", choices=["xunfei", "aliyun", "doubao"],
                     help="服务方 (xunfei / aliyun)")
     ap.add_argument("--mode",      default="all", choices=["asr", "tts", "all"],
                     help="测试模式: asr(仅ASR) / tts(仅TTS) / all(ASR+TTS)")
     ap.add_argument("--data_root",  default="cv-test/cv-corpus-25.0-2026-03-09/zh-CN_subset_5000",
                     help="数据集目录路径")
-    ap.add_argument("--limit",      type=int, default=400, help="处理条数上限")
+    ap.add_argument("--limit",      type=int, default=1, help="处理条数上限")
     ap.add_argument("--output_asr", default=None, help="ASR 结果输出目录 (默认 outputs/<provider>/asr)")
     ap.add_argument("--output_tts", default=None, help="TTS 音频输出目录 (默认 outputs/<provider>/tts)")
     ap.add_argument("--voice",      default=None, help="TTS 发音人")
-    ap.add_argument("--workers",    type=int, default=2, help="并发路数")
+    ap.add_argument("--workers",    type=int, default=1, help="并发路数")
     args = ap.parse_args()
 
     provider = args.provider
