@@ -75,7 +75,10 @@ def process_one(provider, mode, seq, total, fname, sentence, audio, tts_out,
                     asr_text = asr_api.recognize(resampled)
                 else:
                     asr_text = asr_api.recognize(resampled, audio_format="wav")
-
+                    
+                if asr_text is None:
+                    raise ValueError("ASR 返回空结果")
+                   
                 cer = calculate_cer(sentence, asr_text)
                 rec["asr_result"] = asr_text
                 rec["cer"] = round(cer, 4)
