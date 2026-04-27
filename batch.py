@@ -121,8 +121,9 @@ def process_one(provider, mode, seq, total, fname, sentence, audio, tts_out,
 
     time.sleep(0.1)
 
-    with open(os.path.join(output_asr_dir, f"result_{seq:04d}.json"), "w", encoding="utf-8") as f:
-        json.dump(rec, f, ensure_ascii=False, indent=2)
+    if rec["asr_result"] is not None:
+        with open(os.path.join(output_asr_dir, f"result_{seq:04d}.json"), "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=2)
 
     return rec, ok
 
