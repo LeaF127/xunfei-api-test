@@ -137,11 +137,11 @@ def main():
                     help="测试模式: asr(仅ASR) / tts(仅TTS) / all(ASR+TTS)")
     ap.add_argument("--data_root",  default="cv-test/cv-corpus-25.0-2026-03-09/zh-CN_subset_5000",
                     help="数据集目录路径")
-    ap.add_argument("--limit",      type=int, default=400, help="处理条数上限")
+    ap.add_argument("--limit",      type=int, default=1, help="处理条数上限")
     ap.add_argument("--output_asr", default=None, help="ASR 结果输出目录 (默认 outputs/<provider>/asr)")
     ap.add_argument("--output_tts", default=None, help="TTS 音频输出目录 (默认 outputs/<provider>/tts)")
     ap.add_argument("--voice",      default=None, help="TTS 发音人")
-    ap.add_argument("--workers",    type=int, default=2, help="并发路数")
+    ap.add_argument("--workers",    type=int, default=1, help="并发路数")
     args = ap.parse_args()
 
     provider = args.provider

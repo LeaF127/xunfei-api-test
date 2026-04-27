@@ -105,11 +105,11 @@ class DoubaoASR(BaseASR):
     # ==================== 帧构造 ====================
 
     def _build_config_frame(self, audio_format="wav", sample_rate=16000,
-                            bits=16, channel=1, use_gzip=True):
+                            bits=16, channel=1, use_gzip=False):
         config = {
             "app": {
                 "appid": self.appid,
-                "token": "access_token",
+                "token": self.access_token,
                 "cluster": self.cluster,
             },
             "user": {"uid": "benchmark_test"},
