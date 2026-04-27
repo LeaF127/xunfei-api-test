@@ -8,13 +8,6 @@
   格式:  wav / pcm / mp3 / ogg / speex
   时长:  最长 60s
   鉴权:  HMAC256 签名
-
-协议流程:
-  1. 建立 WebSocket 连接（带鉴权 Header）
-  2. 发送 full_client_request（JSON 配置, message_type=1, sequence=1）
-  3. 接收 server ack
-  4. 发送 audio_only_request（音频数据, message_type=2, 最后一包 flags=0b0010）
-  5. 接收 full_server_response（识别结果）
 """
 
 import gzip
@@ -32,8 +25,6 @@ from providers.doubao.auth import build_asr_auth_header
 class DoubaoASR(BaseASR):
     """
     豆包语音 — 一句话识别 (ASR)
-
-    使用 WebSocket 二进制协议，按官方文档流程发送请求。
     """
 
     WS_URL = "wss://openspeech.bytedance.com/api/v2/asr"
@@ -50,14 +41,6 @@ class DoubaoASR(BaseASR):
     @staticmethod
     def _build_header(message_type: int, message_type_specific: int = 0,
                       serialization: int = 1, compression: int = 0) -> bytes:
-        """
-        构造 4 字节二进制协议 header
-
-        Byte 0: [protocol_version=0b0001] [header_size=0b0001(4字节)]
-        Byte 1: [message_type(4bit)] [message_type_specific_flags(4bit)]
-        Byte 2: [serialization(4bit)] [compression(4bit)]
-        Byte 3: reserved = 0x00
-        """
         return bytes([
             0x11,
             (message_type << 4) | (message_type_specific & 0x0F),
@@ -68,48 +51,57 @@ class DoubaoASR(BaseASR):
     @staticmethod
     def _parse_response(data: bytes) -> dict:
         """
-        解析服务端响应帧
-
-        所有消息类型（包括 0x0F 错误）统一使用:
-          header(4) + payload_size(4) + payload
-        payload 可能经过 gzip 压缩和 JSON 序列化。
-
-        Returns:
-            {"msg_type": int, "payload": dict}
+        解析服务端响应帧 — 统一格式: header(4) + payload_size(4) + payload
         """
         if len(data) < 4:
-            return {"msg_type": -1, "payload": {}}
+            return {"msg_type": -1, "payload": {}, "raw_header": None}
 
         msg_type = (data[1] >> 4) & 0x0F
+        msg_specific = data[1] & 0x0F
         serialization = (data[2] >> 4) & 0x0F
         compression = (data[2]) & 0x0F
 
-        # 所有消息类型统一格式: header(4) + payload_size(4) + payload
         if len(data) < 8:
-            return {"msg_type": msg_type, "payload": {}}
+            return {"msg_type": msg_type, "payload": {},
+                    "raw_header": data[:4].hex(), "debug": "no payload size"}
 
         payload_size = struct.unpack(">I", data[4:8])[0]
         payload_raw = data[8:8 + payload_size]
+
+        debug_info = {
+            "msg_type": msg_type,
+            "msg_specific": msg_specific,
+            "serialization": serialization,
+            "compression": compression,
+            "payload_size": payload_size,
+            "actual_data_after_header": len(data) - 8,
+        }
 
         # 解压
         if compression == 1 and payload_raw:
             try:
                 payload_raw = gzip.decompress(payload_raw)
-            except Exception:
-                pass  # 解压失败则保留原始数据
+            except Exception as e:
+                debug_info["gzip_error"] = str(e)
+                return {"msg_type": msg_type, "payload": {},
+                        "raw_header": data[:4].hex(), "debug": debug_info}
 
         # 反序列化
         if serialization == 1 and payload_raw:
             try:
                 payload = json.loads(payload_raw.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                payload = {"raw": payload_raw[:200]}
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                debug_info["json_error"] = str(e)
+                debug_info["raw_preview"] = payload_raw[:200].hex()
+                return {"msg_type": msg_type, "payload": {},
+                        "raw_header": data[:4].hex(), "debug": debug_info}
         elif payload_raw:
-            payload = {"raw_size": len(payload_raw)}
+            # 无序列化, 纯二进制数据（audio_only 确认等）
+            payload = {"_raw_size": len(payload_raw)}
         else:
             payload = {}
 
-        return {"msg_type": msg_type, "payload": payload}
+        return {"msg_type": msg_type, "payload": payload, "debug": debug_info}
 
     # ==================== 帧构造 ====================
 
@@ -118,14 +110,7 @@ class DoubaoASR(BaseASR):
                             bits: int = 16,
                             channel: int = 1,
                             use_gzip: bool = True) -> bytes:
-        """
-        构造 full_client_request 帧（JSON 配置，不含音频）
-
-        message_type = 1 (full_client_request)
-        message_type_specific = 0
-        """
         reqid = str(uuid.uuid4())
-
         config = {
             "app": {
                 "appid": self.appid,
@@ -153,66 +138,32 @@ class DoubaoASR(BaseASR):
 
         if use_gzip:
             payload_bytes = gzip.compress(payload_bytes)
-            header = self._build_header(
-                message_type=1, message_type_specific=0,
-                serialization=1, compression=1,
-            )
+            header = self._build_header(1, 0, 1, 1)
         else:
-            header = self._build_header(
-                message_type=1, message_type_specific=0,
-                serialization=1, compression=0,
-            )
+            header = self._build_header(1, 0, 1, 0)
 
-        payload_size = struct.pack(">I", len(payload_bytes))
-        return header + payload_size + payload_bytes
+        return header + struct.pack(">I", len(payload_bytes)) + payload_bytes
 
     def _build_audio_frame(self, audio_data: bytes,
                            is_last: bool = True,
                            use_gzip: bool = True) -> bytes:
-        """
-        构造 audio_only_request 帧
-
-        message_type = 2 (audio_only)
-        message_type_specific = 0b0000 (非最后一包) 或 0b0010 (最后一包)
-        serialization = 0 (raw bytes)
-        """
         if use_gzip:
             compressed = gzip.compress(audio_data)
-            header = self._build_header(
-                message_type=2,
-                message_type_specific=0b0010 if is_last else 0b0000,
-                serialization=0, compression=1,
-            )
+            header = self._build_header(2, 0b0010 if is_last else 0b0000, 0, 1)
         else:
             compressed = audio_data
-            header = self._build_header(
-                message_type=2,
-                message_type_specific=0b0010 if is_last else 0b0000,
-                serialization=0, compression=0,
-            )
+            header = self._build_header(2, 0b0010 if is_last else 0b0000, 0, 0)
 
-        payload_size = struct.pack(">I", len(compressed))
-        return header + payload_size + compressed
+        return header + struct.pack(">I", len(compressed)) + compressed
 
     # ==================== 识别主逻辑 ====================
 
     def recognize(self, audio_data, audio_format: str = "wav",
                   sample_rate: int = 16000, **kwargs) -> str:
-        """
-        一句话识别
-
-        Args:
-            audio_data: 文件路径 (str) 或音频二进制 (bytes)
-            audio_format: 音频格式 (wav/pcm/mp3/ogg)
-            sample_rate: 采样率
-        Returns:
-            识别文本
-        """
         self.ttft = None
         self.total_time = None
         self.rtf = None
 
-        # 读取音频
         if isinstance(audio_data, str):
             with open(audio_data, "rb") as f:
                 audio = f.read()
@@ -223,7 +174,6 @@ class DoubaoASR(BaseASR):
 
         audio_duration = len(audio) / (sample_rate * 2)
 
-        # 构建鉴权 header
         auth_headers = build_asr_auth_header(
             access_token=self.access_token,
             secret_key=self.secret_key,
@@ -244,32 +194,31 @@ class DoubaoASR(BaseASR):
             )
 
             try:
-                # ---- Step 1: 发送 full_client_request (JSON 配置) ----
+                # ---- Step 1: 发送 config ----
                 config_frame = self._build_config_frame(
-                    audio_format=audio_format,
-                    sample_rate=sample_rate,
+                    audio_format=audio_format, sample_rate=sample_rate,
                     use_gzip=True,
                 )
                 ws.send_binary(config_frame)
 
-                # ---- Step 2: 接收 server ack ----
+                # ---- Step 2: 接收 ack ----
                 ack_data = ws.recv()
-                if isinstance(ack_data, bytes):
+                if isinstance(ack_data, bytes) and len(ack_data) >= 4:
                     ack = self._parse_response(ack_data)
-                    ack_payload = ack.get("payload", {})
-                    code = ack_payload.get("code", 1000) if isinstance(ack_payload, dict) else -1
-                    if code != 1000:
+                    payload = ack.get("payload", {})
+                    debug = ack.get("debug", {})
+                    if isinstance(payload, dict) and payload.get("code", 1000) != 1000:
                         raise RuntimeError(
-                            f"ASR 配置阶段错误: code={code}, "
-                            f"message={ack_payload.get('message', '')}"
+                            f"ASR 配置阶段错误: code={payload.get('code')}, "
+                            f"message={payload.get('message', '')}, debug={debug}"
                         )
                     self.ttft = time.perf_counter() - start
 
-                # ---- Step 3: 发送 audio_only_request (音频数据, 最后一包) ----
+                # ---- Step 3: 发送音频 ----
                 audio_frame = self._build_audio_frame(audio, is_last=True, use_gzip=True)
                 ws.send_binary(audio_frame)
 
-                # ---- Step 4: 接收识别结果 ----
+                # ---- Step 4: 接收结果 ----
                 result_text = ""
                 while True:
                     try:
@@ -281,25 +230,26 @@ class DoubaoASR(BaseASR):
                         continue
 
                     resp = self._parse_response(resp_data)
-                    msg_type = resp["msg_type"]
-                    payload = resp["payload"]
+                    payload = resp.get("payload", {})
+                    debug = resp.get("debug", {})
 
-                    if not isinstance(payload, dict):
+                    if not isinstance(payload, dict) or not payload:
+                        print(f"[ASR debug] 空payload, debug={debug}")
                         continue
 
-                    code = payload.get("code", -1)
-                    if code != 1000:
+                    code = payload.get("code", None)
+                    if code is not None and code != 1000:
                         raise RuntimeError(
-                            f"ASR 错误: code={code}, message={payload.get('message', '')}"
+                            f"ASR 错误: code={code}, "
+                            f"message={payload.get('message', '')}, "
+                            f"debug={debug}"
                         )
 
                     # 提取识别文本
-                    results = payload.get("result", [])
-                    for item in results:
+                    for item in payload.get("result", []):
                         if "text" in item:
                             result_text = item["text"]
 
-                    # sequence 为负数表示最后一包结果
                     seq = payload.get("sequence", 0)
                     if seq < 0:
                         break
