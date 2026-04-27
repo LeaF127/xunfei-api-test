@@ -75,35 +75,13 @@ class AliTTS(BaseTTS):
         # WebSocket 事件
         ws = None
         synthesis_completed = threading.Event()
+        ws_connected = threading.Event()
 
         def on_open(ws_obj):
             """WebSocket 连接建立"""
             nonlocal ws
             ws = ws_obj
-            
-            # 发送合成请求
-            message = {
-                "header": {
-                    "namespace": "SpeechSynthesizer",
-                    "name": "StartSynthesis",
-                    "message_id": str(int(time.time_ns())),
-                    "task_id": f"task-{int(time.time_ns())}",
-                    "status": 20000000,
-                    "status_text": "Gateway:Success:Success."
-                },
-                "payload": {
-                    "format": audio_format.upper(),
-                    "sample_rate": sample_rate,
-                    "voice": voice,
-                    "volume": volume,
-                    "speech_rate": speech_rate,
-                    "pitch_rate": pitch_rate,
-                    "text": text,
-                    "enable_subtitle": False,
-                    "token": token,
-                }
-            }
-            ws.send(json.dumps(message))
+            ws_connected.set()
 
         def on_message(ws_obj, message):
             """接收合成音频数据"""
@@ -134,29 +112,59 @@ class AliTTS(BaseTTS):
             """WebSocket 错误"""
             print(f"[阿里云TTS] WebSocket 错误: {error}")
             synthesis_completed.set()
+            ws_connected.set()
 
         def on_close(ws_obj, close_status, close_msg):
             """WebSocket 连接关闭"""
+            ws_connected.set()
             synthesis_completed.set()
 
-        # 创建 WebSocket 连接
-        ws_app = websocket.WebSocketApp(
-            WS_URL,
-            on_open=on_open,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
-        )
-
-        # 开始计时
+        # 创建 WebSocket 连接（使用 create_connection 支持添加 header）
         self._tts_start = time.perf_counter()
 
-        # 在独立线程中运行 WebSocket
-        def run_ws():
-            ws_app.run_forever()
+        try:
+            ws = websocket.create_connection(
+                WS_URL,
+                header={"X-NLS-Token": token},
+                enable_trace=True,
+            )
+            on_open(ws)
+            
+            # 设置回调
+            ws.set_on_message(on_message)
+            ws.set_on_error(on_error)
+            ws.set_on_close(on_close)
 
-        ws_thread = threading.Thread(target=run_ws, daemon=True)
-        ws_thread.start()
+            # 等待连接建立
+            ws_connected.wait(timeout=10)
+
+            # 发送合成请求
+            message = {
+                "header": {
+                    "namespace": "SpeechSynthesizer",
+                    "name": "StartSynthesis",
+                    "message_id": str(int(time.time_ns())),
+                    "task_id": f"task-{int(time.time_ns())}",
+                    "status": 20000000,
+                    "status_text": "Gateway:Success:Success."
+                },
+                "payload": {
+                    "format": audio_format.upper(),
+                    "sample_rate": sample_rate,
+                    "voice": voice,
+                    "volume": volume,
+                    "speech_rate": speech_rate,
+                    "pitch_rate": pitch_rate,
+                    "text": text,
+                    "enable_subtitle": False,
+                    "token": token,
+                }
+            }
+            ws.send(json.dumps(message))
+
+        except Exception as e:
+            print(f"[阿里云TTS] WebSocket 连接失败: {e}")
+            raise
 
         # 等待合成完成
         synthesis_completed.wait(timeout=30)
@@ -169,7 +177,7 @@ class AliTTS(BaseTTS):
         if self.audio_data:
             if audio_format == "mp3":
                 # 简化的 MP3 时长估算（可根据实际情况调整）
-                # 这里假设平均 128kbps，每个字节约 1/16000 秒
+                # 这里假设平均 128kbps，每个字约 1/16000 秒
                 audio_duration = len(self.audio_data) / 16000
             else:  # pcm / wav
                 audio_duration = len(self.audio_data) / (sample_rate * 2)

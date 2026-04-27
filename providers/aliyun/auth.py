@@ -92,10 +92,16 @@ class AliyunAuth:
 
         response = client.do_action_with_exception(request)
 
-        if response.get("status") != 200:
-            raise RuntimeError(f"获取 Token 失败: {response}")
+        # SDK 返回的格式可能是 dict 或 bytes
+        if isinstance(response, dict):
+            if response.get("status") != 200:
+                raise RuntimeError(f"获取 Token 失败: {response}")
+            data = json.loads(response.get("body", "{}"))
+        elif isinstance(response, bytes):
+            data = json.loads(response)
+        else:
+            raise RuntimeError(f"未知响应类型: {type(response)}")
 
-        data = json.loads(response.get("body", "{}"))
         if "Token" not in data:
             raise RuntimeError(f"Token 响应格式错误: {data}")
 

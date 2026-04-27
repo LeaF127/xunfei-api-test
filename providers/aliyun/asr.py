@@ -79,15 +79,67 @@ class AliASR(BaseASR):
 
         token = self.auth.get_token()
 
-        # WebSocket 事件
+        # 使用 WebSocket 连接（支持添加 header）
         ws = None
         recognition_completed = threading.Event()
+        ws_connected = threading.Event()
+
+        def on_message(ws_obj, message):
+            """接收识别结果"""
+            data = json.loads(message)
+
+            # 处理中间识别结果
+            if data.get("header", {}).get("name") == "RecognitionResultChanged":
+                result = data.get("payload", {}).get("result", "")
+                if result and self._first_result_time is None:
+                    self._first_result_time = time.perf_counter() - self._asr_start
+
+            # 处理最终识别结果
+            if data.get("header", {}).get("name") == "RecognitionCompleted":
+                result = data.get("payload", {}).get("result", "")
+                if result:
+                    self.result_text = result
+                    if self._first_result_time is None:
+                        self._first_result_time = time.perf_counter() - self._asr_start
+                recognition_completed.set()
+                ws_obj.close()
+
+        def on_error(ws_obj, error):
+            """WebSocket 错误"""
+            print(f"[阿里云ASR] WebSocket 错误: {error}")
+            recognition_completed.set()
+            ws_connected.set()
+
+        def on_close(ws_obj, close_status, close_msg):
+            """WebSocket 连接关闭"""
+            ws_connected.set()
+            recognition_completed.set()
 
         def on_open(ws_obj):
             """WebSocket 连接建立"""
             nonlocal ws
             ws = ws_obj
+            ws_connected.set()
+
+        # 创建 WebSocket 连接（使用 create_connection 支持添加 header）
+        self._asr_start = time.perf_counter()
+
+        try:
+            ws = websocket.create_connection(
+                WS_URL,
+                header={"X-NLS-Token": token},
+                enable_trace=True,
+            )
+            on_open(ws)
             
+            # 设置回调
+            ws.set_on_message(on_message)
+            ws.set_on_error(on_error)
+            ws.set_on_close(on_close)
+
+            # 等待连接建立
+            ws_connected.wait(timeout=10)
+
             # 发送开始识别指令
             start_message = {
                 "header": {
@@ -109,87 +161,34 @@ class AliASR(BaseASR):
             }
             ws.send(json.dumps(start_message))
 
-        def on_message(ws_obj, message):
-            """接收识别结果"""
-            nonlocal ws
-            data = json.loads(message)
+            # 发送音频数据（需要 base64 编码）
+            audio_b64 = base64.b64encode(audio_data).decode("utf-8")
 
-            # 处理中间识别结果（暂不使用）
-            if data.get("header", {}).get("name") == "RecognitionResultChanged":
-                result = data.get("payload", {}).get("result", "")
-                if result and self._first_result_time is None:
-                    self._first_result_time = time.perf_counter() - self._asr_start
-
-            # 处理最终识别结果
-            if data.get("header", {}).get("name") == "RecognitionCompleted":
-                result = data.get("payload", {}).get("result", "")
-                if result:
-                    self.result_text = result
-                    if self._first_result_time is None:
-                        self._first_result_time = time.perf_counter() - self._asr_start
-                recognition_completed.set()
-                ws.close()
-
-        def on_error(ws_obj, error):
-            """WebSocket 错误"""
-            print(f"[阿里云ASR] WebSocket 错误: {error}")
-            recognition_completed.set()
-
-        def on_close(ws_obj, close_status, close_msg):
-            """WebSocket 连接关闭"""
-            recognition_completed.set()
-
-        # 创建 WebSocket 连接
-        ws_app = websocket.WebSocketApp(
-            WS_URL,
-            on_open=on_open,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
-        )
-
-        # 开始计时
-        self._asr_start = time.perf_counter()
-
-        # 在独立线程中运行 WebSocket
-        def run_ws():
-            ws_app.run_forever()
-
-        ws_thread = threading.Thread(target=run_ws, daemon=True)
-        ws_thread.start()
-
-        # 等待 WebSocket 连接建立
-        time.sleep(0.5)
-
-        # 发送音频数据（需要 base64 编码，按照 WebSocket 消息格式）
-        audio_b64 = base64.b64encode(audio_data).decode("utf-8")
-
-        # 分块发送音频数据（模拟流式发送）
-        chunk_size = 3200  # 每块约 100ms 音频（16000Hz PCM）
-        offset = 0
-        while offset < len(audio_b64):
-            chunk = audio_b64[offset:offset + chunk_size]
-            
-            data_message = {
-                "header": {
-                    "namespace": "SpeechRecognizer",
-                    "name": "SendAudio",
-                    "message_id": str(int(time.time_ns())),
-                    "task_id": f"task-{int(time.time_ns())}",
-                    "status": 20000000,
-                    "status_text": "Gateway:Success:Success."
-                },
-                "payload": {
-                    "audio": chunk,
-                    "status": 1  # 1=中间数据
+            # 分块发送音频数据
+            chunk_size = 3200  # 每块约 100ms 音频（16000Hz PCM）
+            offset = 0
+            while offset < len(audio_b64):
+                chunk = audio_b64[offset:offset + chunk_size]
+                
+                data_message = {
+                    "header": {
+                        "namespace": "SpeechRecognizer",
+                        "name": "SendAudio",
+                        "message_id": str(int(time.time_ns())),
+                        "task_id": f"task-{int(time.time_ns())}",
+                        "status": 20000000,
+                        "status_text": "Gateway:Success:Success."
+                    },
+                    "payload": {
+                        "audio": chunk,
+                        "status": 1  # 1=中间数据
+                    }
                 }
-            }
-            ws_app.send(json.dumps(data_message))
-            offset += chunk_size
-            time.sleep(0.04)  # 模拟实时发送间隔
+                ws.send(json.dumps(data_message))
+                offset += chunk_size
+                time.sleep(0.04)  # 模拟实时发送间隔
 
-        # 发送最后一帧
-        if offset >= len(audio_b64):
+            # 发送最后一帧
             end_message = {
                 "header": {
                     "namespace": "SpeechRecognizer",
@@ -204,7 +203,11 @@ class AliASR(BaseASR):
                     "status": 2  # 2=最后一帧，结束识别
                 }
             }
-            ws_app.send(json.dumps(end_message))
+            ws.send(json.dumps(end_message))
+
+        except Exception as e:
+            print(f"[阿里云ASR] WebSocket 连接失败: {e}")
+            raise
 
         # 等待识别完成
         recognition_completed.wait(timeout=30)
