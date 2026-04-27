@@ -19,7 +19,7 @@ import uuid
 import websocket
 
 from providers.base import BaseASR
-from providers.doubao.auth import build_asr_auth_header
+from providers.doubao.auth import build_asr_auth_header, build_tts_headers_bearer
 
 
 class DoubaoASR(BaseASR):
@@ -160,12 +160,13 @@ class DoubaoASR(BaseASR):
 
         audio_duration = len(audio) / (sample_rate * 2)
 
-        auth_headers = build_asr_auth_header(
-            access_token=self.access_token,
-            secret_key=self.secret_key,
-            method="GET", path="/api/v2/asr",
-            host="openspeech.bytedance.com",
-        )
+        # auth_headers = build_asr_auth_header(
+        #     access_token=self.access_token,
+        #     secret_key=self.secret_key,
+        #     method="GET", path="/api/v2/asr",
+        #     host="openspeech.bytedance.com",
+        # )
+        auth_headers = build_tts_headers_bearer(self.access_token)
 
         start = time.perf_counter()
 
