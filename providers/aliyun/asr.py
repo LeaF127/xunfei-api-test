@@ -1,4 +1,22 @@
-"""阿里云一句话识别 (ASR) — RESTful API"""
+"""阿里云一句话识别 (ASR) — RESTful API
+
+文档: https://help.aliyun.com/zh/isi/developer-reference/restful-api-2
+
+接口要求:
+  协议:    HTTPS
+  地址:    https://nls-gateway-cn-shanghai.aliyuncs.com/stream/v1/asr
+  方法:    POST
+  音频:    采样率 8k/16k, 16bit, 单声道
+  格式:    pcm / wav / mp3 / opus
+  时长:    最长 60s
+
+请求 Header:
+  X-NLS-Token: <token>
+  Content-Type: application/octet-stream
+
+成功响应:
+  {"task_id":"...","result":"北京的天气","status":20000000,"message":"SUCCESS"}
+"""
 
 import time
 
@@ -10,14 +28,7 @@ from providers.aliyun.auth import AliyunAuth
 
 class AliASR(BaseASR):
     """
-    阿里云智能语音交互 — 一句话识别
-
-    接口要求:
-      协议:    HTTPS (RESTful)
-      地址:    https://nls-gateway-cn-shanghai.aliyuncs.com/stream/v1/asr
-      音频:    采样率 8k/16k, 16bit, 单声道
-      格式:    pcm / wav / mp3 / ogg / opus / speex
-      时长:    最长 60s
+    阿里云智能语音交互 — 一句话识别（RESTful API）
     """
 
     GATEWAY_URL = "https://nls-gateway-cn-shanghai.aliyuncs.com/stream/v1/asr"
@@ -58,6 +69,7 @@ class AliASR(BaseASR):
         audio_duration = len(audio) / (sample_rate * 2)
         token = self.auth.get_token()
 
+        # 构造请求 URL（参数通过 Query String 传递）
         url = (
             f"{self.GATEWAY_URL}"
             f"?appkey={self.app_key}"
@@ -77,11 +89,18 @@ class AliASR(BaseASR):
         self.total_time = time.perf_counter() - start
 
         if response.status_code != 200:
-            raise RuntimeError(f"ASR 请求失败: HTTP {response.status_code}, {response.text}")
+            raise RuntimeError(
+                f"ASR 请求失败: HTTP {response.status_code}, {response.text}"
+            )
 
         result = response.json()
-        if result.get("status") != 200:
-            raise RuntimeError(f"ASR 识别失败: {result}")
+
+        # 阿里云状态码: 20000000 = SUCCESS
+        status = result.get("status", -1)
+        if status != 20000000:
+            raise RuntimeError(
+                f"ASR 识别失败: status={status}, message={result.get('message', '')}"
+            )
 
         self.ttft = self.total_time  # RESTful 模式下 TTFT ≈ 总耗时
         text = result.get("result", "")

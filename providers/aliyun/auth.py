@@ -3,7 +3,6 @@
 import base64
 import hashlib
 import hmac
-import json
 import time
 import urllib.parse
 
@@ -23,7 +22,7 @@ class AliyunAuth:
 
     @staticmethod
     def _percent_encode(s: str) -> str:
-        """阿里云 OpenAPI 编码规则"""
+        """阿里云 OpenAPI 编码规则（RFC 3986）"""
         return (
             urllib.parse.quote(s, safe="")
             .replace("+", "%20")
@@ -55,7 +54,7 @@ class AliyunAuth:
 
         params = {
             "Action": "CreateToken",
-            "Version": "2019-04-12",
+            "Version": "2019-02-28",
             "AccessKeyId": self.access_key_id,
             "Format": "JSON",
             "RegionId": "cn-shanghai",
