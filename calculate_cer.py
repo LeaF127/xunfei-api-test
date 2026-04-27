@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import re
+import unicodedata
 from pathlib import Path
 from datetime import datetime
 
@@ -23,22 +24,129 @@ import pandas as pd
 
 from utils.metrics import calculate_cer
 
+def levenshtein_distance(s1, s2):
+    """计算两个字符串的编辑距离"""
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
 
-def _normalize_text(text: str) -> str:
+    if len(s2) == 0:
+        return len(s1)
+
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+
+    return previous_row[-1]
+
+
+# CJK 语种 (中日韩) - 评测时去除空格
+# 韩语(ko)使用空格作为词分隔符, 保留空格为NIST标准做法
+# 此处按需求去除韩语空格, 以排除ASR模型띄어쓰기缺陷对CER的影响
+CJK_LANGUAGES = {"zh", "zh_paraformer", "zh_qwen3asr", "ja", "ko"}
+
+
+# 阿拉伯数字 → 中文/日文字符映射 (逐位转换)
+_ZH_DIGIT_MAP = str.maketrans("0123456789", "零一二三四五六七八九")
+_JA_DIGIT_MAP = str.maketrans("0123456789", "〇一二三四五六七八九")
+
+
+def _normalize_digits_cjk(text, lang):
+    """CJK 语种: 将阿拉伯数字逐位转为对应语言的字符, 统一数字表示形式
+    例如: "2014年" → "二零一四年", "100元" → "一零零元"
+    这样 ASR 输出 "二零一四年" 和参考文本 "2014年" 就能正确匹配
     """
-    正规化文本（与 utils/metrics.py 保持一致）
-    1. 去除标点
-    2. 转换为小写
-    3. 去除空格
-    """
-    if not text:
-        return ""
-    # 去除标点：保留中文、字母、数字
-    # 正则匹配非中文、非字母数字的字符（包括标点和空格）
-    text = re.sub(r'[^\w\u4e00-\u9fff]', '', text)
-    # 转换为小写
-    text = text.lower()
+    if lang in ("zh", "zh_paraformer", "zh_qwen3asr"):
+        return text.translate(_ZH_DIGIT_MAP)
+    elif lang == "ja":
+        return text.translate(_JA_DIGIT_MAP)
+    # 韩语: 保留阿拉伯数字 (韩文 ASR 通常输出阿拉伯数字)
     return text
+
+
+def normalize_text(text, lang):
+    """
+    文本归一化 (标准 ASR 评测流程, 符合 NIST/HuggingFace 标准)
+    1. Unicode NFC 归一化 (组合字符、全角/半角等)
+    2. 去除 SPS 标注标记 (<disfluency>, <noise>, <unclear>, [um], [noise] 等)
+    3. 大小写归一化: 全部转小写
+    4. 去除标点符号
+    5. CJK 语种: 阿拉伯数字转为中文/日文字符, 统一数字表示
+    6. CJK 语种去除空格, 非 CJK 语种保留空格
+    7. 去除首尾空白
+    """
+    # Unicode NFC 归一化 (NIST 标准推荐)
+    text = unicodedata.normalize("NFC", text)
+
+    # 去除 SPS 标注标记: <...> 和 [...]
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\[[^\]]+\]", "", text)
+
+    # 统一转小写
+    text = text.lower()
+
+    # 去除标点 (保留字母、数字、空格和 CJK 字符)
+    text = "".join(
+        ch for ch in text
+        if unicodedata.category(ch).startswith(("L", "N", "Zs"))
+        or ch == " "  # 确保普通空格保留
+    )
+
+    # CJK 语种: 阿拉伯数字 → 中文/日文字符 (统一数字表示形式)
+    if lang in CJK_LANGUAGES:
+        text = _normalize_digits_cjk(text, lang)
+
+    # CJK 语种去除空格
+    if lang in CJK_LANGUAGES:
+        text = text.replace(" ", "")
+
+    # 合并连续空格为单个空格 (非 CJK)
+    if lang not in CJK_LANGUAGES:
+        text = re.sub(r" +", " ", text)
+
+    return text.strip()
+
+
+def compute_cer_detail(reference, hypothesis, lang="zh"):
+    """
+    计算 CER 的详细结果, 返回编辑距离和参考字符数
+    用于微平均聚合 (NIST/HuggingFace 标准聚合方式)
+    
+    Returns: (distance, ref_len) 或 (inf, 0) 表示空参考
+    """
+    ref_norm = normalize_text(reference, lang)
+    hyp_norm = normalize_text(hypothesis, lang)
+    ref_chars = list(ref_norm)
+    hyp_chars = list(hyp_norm)
+    distance = levenshtein_distance(ref_chars, hyp_chars)
+    ref_len = len(ref_chars)
+    return distance, ref_len
+
+
+def compute_cer(reference, hypothesis, lang="zh"):
+    """
+    计算 CER (Character Error Rate) - 符合 NIST/HuggingFace 标准 ASR 评测规范
+    
+    CER = (S + D + I) / N = Levenshtein编辑距离 / 参考文本字符数
+    
+    标准处理流程:
+    1. Unicode NFC 归一化
+    2. 去除标注标记
+    3. 大小写归一化
+    4. 去除标点
+    5. CJK 语种去空格, 非 CJK 保留空格(空格也是字符)
+    
+    注意: CER 可以超过 1.0 (当插入数很多时), 这是正常的
+    """
+    distance, ref_len = compute_cer_detail(reference, hypothesis, lang)
+    if ref_len == 0:
+        return 0.0 if distance == 0 else float("inf")
+    return distance / ref_len
 
 
 def load_json_files(directory: str):
@@ -90,7 +198,7 @@ def calculate_directory_cer(directory: str):
             continue
         
         # 计算 CER
-        cer = calculate_cer(ground_truth, asr_result)
+        cer = compute_cer(ground_truth, asr_result)
         
         results.append({
             "filename": filename,
