@@ -18,6 +18,10 @@ def get_asr(provider: str) -> BaseASR:
         from providers.doubao import DoubaoASR
         from config import DOUBAO_APP_ID, DOUBAO_ACCESS_TOKEN, DOUBAO_SECRET_KEY, DOUBAO_CLUSTER
         return DoubaoASR(DOUBAO_APP_ID, DOUBAO_ACCESS_TOKEN, DOUBAO_SECRET_KEY, DOUBAO_CLUSTER)
+    elif provider == "doubao_bigmodel":
+        from providers.doubao import DoubaoBigModelASR
+        from config import DOUBAO_API_KEY, DOUBAO_RESOURCE_ID
+        return DoubaoBigModelASR(DOUBAO_API_KEY, DOUBAO_RESOURCE_ID)
     else:
         raise ValueError(f"不支持的 provider: {provider}")
 
@@ -32,7 +36,7 @@ def get_tts(provider: str) -> BaseTTS:
         from providers.aliyun import AliTTS
         from config import ALIYUN_ACCESS_KEY_ID, ALIYUN_ACCESS_KEY_SECRET, ALIYUN_APP_KEY
         return AliTTS(ALIYUN_ACCESS_KEY_ID, ALIYUN_ACCESS_KEY_SECRET, ALIYUN_APP_KEY)
-    elif provider == "doubao":
+    elif provider in ("doubao", "doubao_bigmodel"):
         from providers.doubao import DoubaoTTS
         from config import DOUBAO_APP_ID, DOUBAO_ACCESS_TOKEN, DOUBAO_CLUSTER
         return DoubaoTTS(DOUBAO_APP_ID, DOUBAO_ACCESS_TOKEN, DOUBAO_CLUSTER)
