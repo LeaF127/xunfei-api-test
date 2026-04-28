@@ -78,19 +78,19 @@ def process_one(provider, mode, seq, total, fname, sentence, audio, tts_out,
                 asr_api = get_asr(provider)
                 resampled = resample_streaming(audio)
                 if provider == "xunfei":
-                    asr_text = asr_api.recognize(resampled)
+                    asr_text, asr_m = asr_api.recognize(resampled)
                 else:
-                    asr_text = asr_api.recognize(resampled, audio_format="wav")
-                    
+                    asr_text, asr_m = asr_api.recognize(resampled, audio_format="wav")
+
                 if asr_text is None:
                     raise ValueError("ASR 返回空结果")
-                   
+
                 cer = calculate_cer(sentence, asr_text)
                 rec["asr_result"] = asr_text
                 rec["cer"] = round(cer, 4)
-                rec["asr_ttft_ms"]      = round(asr_api.ttft * 1000, 1)  if asr_api.ttft      is not None else None
-                rec["asr_total_time_ms"] = round(asr_api.total_time * 1000, 1) if asr_api.total_time is not None else None
-                rec["asr_rtf"]          = round(asr_api.rtf, 4)           if asr_api.rtf       is not None else None
+                rec["asr_ttft_ms"]      = round(asr_m.ttft * 1000, 1)  if asr_m.ttft      is not None else None
+                rec["asr_total_time_ms"] = round(asr_m.total_time * 1000, 1) if asr_m.total_time is not None else None
+                rec["asr_rtf"]          = round(asr_m.rtf, 4)           if asr_m.rtf       is not None else None
             except Exception as e:
                 _sync_print(f"  ❌ ASR 异常: {e}")
                 ok = False
@@ -105,10 +105,10 @@ def process_one(provider, mode, seq, total, fname, sentence, audio, tts_out,
     if mode in ("tts", "all"):
         try:
             tts_api = get_tts(provider)
-            r = tts_api.synthesize(sentence, output_file=tts_out)
-            rec["tts_ttft_ms"]      = round(tts_api.ttft * 1000, 1)  if tts_api.ttft      is not None else None
-            rec["tts_total_time_ms"] = round(tts_api.total_time * 1000, 1) if tts_api.total_time is not None else None
-            rec["tts_rtf"]          = round(tts_api.rtf, 4)           if tts_api.rtf       is not None else None
+            r, tts_m = tts_api.synthesize(sentence, output_file=tts_out)
+            rec["tts_ttft_ms"]      = round(tts_m.ttft * 1000, 1)  if tts_m.ttft      is not None else None
+            rec["tts_total_time_ms"] = round(tts_m.total_time * 1000, 1) if tts_m.total_time is not None else None
+            rec["tts_rtf"]          = round(tts_m.rtf, 4)           if tts_m.rtf       is not None else None
             if r:
                 _sync_print(f"  ✅ TTS → {tts_out}")
                 if rec["tts_ttft_ms"] is not None:

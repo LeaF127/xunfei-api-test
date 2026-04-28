@@ -7,7 +7,7 @@ import time
 
 import websocket
 
-from providers.base import BaseTTS
+from providers.base import BaseTTS, Metrics
 from providers.xunfei.auth import create_auth_url
 from utils.audio import estimate_mp3_duration, get_audio_duration
 
@@ -124,7 +124,9 @@ class XunFeiTTS(BaseTTS):
                 f.write(self.audio_data)
             print(f"[TTS] 音频已保存: {output_file} ({len(self.audio_data)} bytes)")
 
-        return self.audio_data
+        m = Metrics(ttft=self.ttft, total_time=self.total_time, rtf=self.rtf)
+        self.last_metrics = m
+        return self.audio_data, m
 
     def _on_open(self, ws):
         ws.send(self._request_body)

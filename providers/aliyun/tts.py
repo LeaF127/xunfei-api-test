@@ -14,7 +14,7 @@ import json
 import time
 import http.client
 
-from providers.base import BaseTTS
+from providers.base import BaseTTS, Metrics
 from providers.aliyun.auth import AliyunAuth
 
 # RESTful 服务地址
@@ -116,4 +116,6 @@ class AliTTS(BaseTTS):
                 f.write(self.audio_data)
             print(f"[TTS] 音频已保存: {output_file} ({len(self.audio_data)} bytes)")
 
-        return self.audio_data
+        m = Metrics(ttft=self.ttft, total_time=self.total_time, rtf=self.rtf)
+        self.last_metrics = m
+        return self.audio_data, m

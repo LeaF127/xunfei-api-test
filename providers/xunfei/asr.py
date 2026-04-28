@@ -8,7 +8,7 @@ import threading
 
 import websocket
 
-from providers.base import BaseASR
+from providers.base import BaseASR, Metrics
 from providers.xunfei.auth import create_auth_url
 from utils.audio import get_audio_duration
 
@@ -116,7 +116,9 @@ class XunFeiASR(BaseASR):
         if audio_duration > 0:
             self.rtf = self.total_time / audio_duration
 
-        return self.result_text
+        m = Metrics(ttft=self.ttft, total_time=self.total_time, rtf=self.rtf)
+        self.last_metrics = m
+        return self.result_text, m
 
     def _on_open(self, ws, audio_data, frame_size, audio_format, encoding):
         """连接建立后发送音频数据"""

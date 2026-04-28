@@ -14,7 +14,7 @@ import json
 import time
 import http.client
 
-from providers.base import BaseASR
+from providers.base import BaseASR, Metrics
 from providers.aliyun.auth import AliyunAuth
 
 # RESTful 服务地址
@@ -137,4 +137,6 @@ class AliASR(BaseASR):
         if audio_duration > 0:
             self.rtf = self.total_time / audio_duration
 
-        return self.result_text
+        m = Metrics(ttft=self.ttft, total_time=self.total_time, rtf=self.rtf)
+        self.last_metrics = m
+        return self.result_text, m

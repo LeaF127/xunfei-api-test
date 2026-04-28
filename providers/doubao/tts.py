@@ -17,7 +17,7 @@ import uuid
 
 import requests
 
-from providers.base import BaseTTS
+from providers.base import BaseTTS, Metrics
 from providers.doubao.auth import build_tts_headers_bearer
 from utils.audio import estimate_mp3_duration
 
@@ -133,4 +133,6 @@ class DoubaoTTS(BaseTTS):
                 f.write(audio_data)
             print(f"[TTS] 音频已保存: {output_file} ({len(audio_data)} bytes)")
 
-        return audio_data
+        m = Metrics(ttft=self.ttft, total_time=self.total_time, rtf=self.rtf)
+        self.last_metrics = m
+        return audio_data, m
