@@ -270,9 +270,10 @@ def main():
     print(f"   最高 CER: {max_cer:.4f}")
     print(f"   最低 CER: {min_cer:.4f}")
     
-    # 显示前 10 个结果
-    print(f"\n前 10 个结果:")
-    for r in results[:10]:
+    # 显示前 10 个cer最高的结果
+    print(f"\n CER 最高前 10 个结果:")
+    sorted_results = sorted(results, key=lambda x: x["cer"], reverse=True)
+    for r in sorted_results[:10]:
         print(f"   {r['filename']}: CER={r['cer']:.4f}")
     
     print(f"\n{'='*50}")
