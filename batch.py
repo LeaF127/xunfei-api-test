@@ -139,8 +139,8 @@ def process_one(provider, mode, seq, total, fname, sentence, audio, tts_out,
 
 def main():
     ap = argparse.ArgumentParser(description="ASR + TTS 批量测试")
-    ap.add_argument("--provider",  default="xunfei", choices=["xunfei", "aliyun", "doubao"],
-                    help="服务方 (xunfei / aliyun / doubao)")
+    ap.add_argument("--provider",  default="xunfei", choices=["xunfei", "aliyun", "doubao", "doubao_bigmodel"],
+                    help="服务方 (xunfei / aliyun / doubao / doubao_bigmodel)")
     ap.add_argument("--mode",      default="all", choices=["asr", "tts", "all"],
                     help="测试模式: asr(仅ASR) / tts(仅TTS) / all(ASR+TTS)")
     ap.add_argument("--data_root",  default="cv-test/cv-corpus-25.0-2026-03-09/zh-CN_subset_5000",
