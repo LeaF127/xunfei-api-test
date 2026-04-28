@@ -19,3 +19,7 @@ DOUBAO_APP_ID = os.getenv("DOUBAO_APP_ID", "")
 DOUBAO_ACCESS_TOKEN = os.getenv("DOUBAO_ACCESS_TOKEN", "")
 DOUBAO_SECRET_KEY = os.getenv("DOUBAO_SECRET_KEY", "")
 DOUBAO_CLUSTER = os.getenv("DOUBAO_CLUSTER", "volcano_tts")
+
+# ===== 豆包大模型流式识别 =====
+DOUBAO_API_KEY = os.getenv("DOUBAO_API_KEY", "")
+DOUBAO_RESOURCE_ID = os.getenv("DOUBAO_RESOURCE_ID", "volc.bigasr.sauc.duration")
