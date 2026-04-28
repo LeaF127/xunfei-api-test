@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-统一批量测试脚本 — 支持 xunfei / aliyun 多服务方
+统一批量测试脚本 — 支持 xunfei / aliyun / doubao 多服务方
 用法:
     python batch.py --provider xunfei --mode all --limit 400 --workers 2
     python batch.py --provider aliyun  --mode asr --limit 100 --workers 1
+    python batch.py --provider doubao  --mode tts --limit 100 --workers 1
 """
 
 import os
@@ -40,8 +41,8 @@ def try_load_existing(seq, output_asr_dir):
                 if rec["asr_result"] == "":
                     os.remove(path)
                     print(f"  已缓存但 ASR 结果为空，已删除: {path}")
-                    return None, False                
-            
+                    return None, False
+                
             return rec, True
         except (json.JSONDecodeError, IOError):
             return None, False
@@ -53,10 +54,13 @@ def process_one(provider, mode, seq, total, fname, sentence, audio, tts_out,
                 output_asr_dir):
     """
     处理单条数据（每个线程独立执行）
+    所有 print 内容先拼成字符串，最后一次性原子输出，避免并发交错。
     mode: asr | tts | all
     """
-    _sync_print(f"\n[{seq}/{total}] {fname}")
-    _sync_print(f"  原文: {sentence}")
+    lines = []  # 收集本条所有输出，最后一次性打印
+
+    lines.append(f"\n[{seq}/{total}] {fname}")
+    lines.append(f"  原文: {sentence}")
 
     rec = {
         "index": seq, "filename": fname, "ground_truth": sentence,
@@ -71,7 +75,7 @@ def process_one(provider, mode, seq, total, fname, sentence, audio, tts_out,
     # ---- ASR ----
     if mode in ("asr", "all"):
         if not os.path.exists(audio):
-            _sync_print(f"  ⚠ 音频不存在: {audio}")
+            lines.append(f"  ⚠ 音频不存在: {audio}")
             ok = False
         else:
             try:
@@ -92,14 +96,14 @@ def process_one(provider, mode, seq, total, fname, sentence, audio, tts_out,
                 rec["asr_total_time_ms"] = round(asr_m.total_time * 1000, 1) if asr_m.total_time is not None else None
                 rec["asr_rtf"]          = round(asr_m.rtf, 4)           if asr_m.rtf       is not None else None
             except Exception as e:
-                _sync_print(f"  ❌ ASR 异常: {e}")
+                lines.append(f"  ❌ ASR 异常: {e}")
                 ok = False
 
         if rec["asr_result"]:
-            _sync_print(f"  识别: {rec['asr_result']}")
-            _sync_print(f"  CER:  {rec['cer']:.4f}")
+            lines.append(f"  识别: {rec['asr_result']}")
+            lines.append(f"  CER:  {rec['cer']:.4f}")
             if rec["asr_ttft_ms"] is not None:
-                _sync_print(f"  ASR TTFT: {rec['asr_ttft_ms']:.1f} ms | 总耗时: {rec['asr_total_time_ms']:.1f} ms | RTF: {rec['asr_rtf']:.4f}")
+                lines.append(f"  ASR TTFT: {rec['asr_ttft_ms']:.1f} ms | 总耗时: {rec['asr_total_time_ms']:.1f} ms | RTF: {rec['asr_rtf']:.4f}")
 
     # ---- TTS ----
     if mode in ("tts", "all"):
@@ -110,17 +114,20 @@ def process_one(provider, mode, seq, total, fname, sentence, audio, tts_out,
             rec["tts_total_time_ms"] = round(tts_m.total_time * 1000, 1) if tts_m.total_time is not None else None
             rec["tts_rtf"]          = round(tts_m.rtf, 4)           if tts_m.rtf       is not None else None
             if r:
-                _sync_print(f"  ✅ TTS → {tts_out}")
+                lines.append(f"  ✅ TTS → {tts_out}")
                 if rec["tts_ttft_ms"] is not None:
-                    _sync_print(f"  TTS TTFT: {rec['tts_ttft_ms']:.1f} ms | 总耗时: {rec['tts_total_time_ms']:.1f} ms | RTF: {rec['tts_rtf']:.4f}")
+                    lines.append(f"  TTS TTFT: {rec['tts_ttft_ms']:.1f} ms | 总耗时: {rec['tts_total_time_ms']:.1f} ms | RTF: {rec['tts_rtf']:.4f}")
             else:
-                _sync_print(f"  ❌ TTS 合成失败")
+                lines.append(f"  ❌ TTS 合成失败")
                 ok = False
         except Exception as e:
-            _sync_print(f"  ❌ TTS 异常: {e}")
+            lines.append(f"  ❌ TTS 异常: {e}")
             ok = False
 
     time.sleep(0.1)
+
+    # 原子输出：一次性打印本条所有内容
+    _sync_print("\n".join(lines))
 
     if rec["asr_result"] is not None:
         with open(os.path.join(output_asr_dir, f"result_{seq:04d}.json"), "w", encoding="utf-8") as f:
@@ -133,7 +140,7 @@ def process_one(provider, mode, seq, total, fname, sentence, audio, tts_out,
 def main():
     ap = argparse.ArgumentParser(description="ASR + TTS 批量测试")
     ap.add_argument("--provider",  default="xunfei", choices=["xunfei", "aliyun", "doubao"],
-                    help="服务方 (xunfei / aliyun)")
+                    help="服务方 (xunfei / aliyun / doubao)")
     ap.add_argument("--mode",      default="all", choices=["asr", "tts", "all"],
                     help="测试模式: asr(仅ASR) / tts(仅TTS) / all(ASR+TTS)")
     ap.add_argument("--data_root",  default="cv-test/cv-corpus-25.0-2026-03-09/zh-CN_subset_5000",
