@@ -188,12 +188,13 @@ def main():
     # 随机抽样
     if args.sample:
         n = min(args.sample, len(df))
-        df = df.sample(n=n, random_state=args.seed).sort_index()
+        df = df.sample(n=n, random_state=args.seed).sort_index().reset_index(drop=True)
         print(f"🎲 随机抽样: {n} 条 (seed={args.seed})")
 
     # 条数上限
     if args.limit:
         df = df.head(args.limit)
+        df = df.reset_index(drop=True)
 
     print(f"📊 最终测试: {len(df)} 条")
     print(f"⚡ 服务方: {provider} | 模式: {mode} | 并发: {args.workers}")
