@@ -113,12 +113,13 @@ class DoubaoBigModelASR(BaseASR):
 
     # ==================== 帧构造 ====================
 
-    def _build_config_frame(self, audio_format="wav", sample_rate=16000,
+    def _build_config_frame(self, language="zh-CN",audio_format="wav", sample_rate=16000,
                             bits=16, channel=1, use_gzip=False) -> bytes:
         """构造 full_client_request (JSON 配置)"""
         config = {
             "user": {"uid": "benchmark_test"},
             "audio": {
+                "language": language,
                 "format": audio_format,
                 "rate": sample_rate,
                 "bits": bits,
@@ -142,7 +143,7 @@ class DoubaoBigModelASR(BaseASR):
 
     @staticmethod
     def _build_audio_frame(audio_data: bytes, seq: int, is_last: bool = False,
-                           use_gzip: bool = True) -> bytes:
+                           use_gzip: bool = False) -> bytes:
         """
         构造 audio_only_request
 
