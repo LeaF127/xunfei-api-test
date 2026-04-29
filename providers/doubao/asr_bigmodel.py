@@ -3,7 +3,7 @@
 
 接口说明:
   协议:  WebSocket
-  地址:  wss://openspeech.bytedance.com/api/v3/sauc/bigmodel
+  地址:  wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
   鉴权:  X-Api-Key + X-Api-Resource-Id (Header)
   音频:  采样率 16kHz, 16bit, 单声道
   格式:  wav / pcm / ogg / mp3
@@ -35,7 +35,7 @@ from providers.base import BaseASR, Metrics
 class DoubaoBigModelASR(BaseASR):
     """豆包语音 — 大模型流式语音识别"""
 
-    WS_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel"
+    WS_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
 
     def __init__(self, api_key: str, resource_id: str):
         super().__init__()
@@ -114,7 +114,7 @@ class DoubaoBigModelASR(BaseASR):
     # ==================== 帧构造 ====================
 
     def _build_config_frame(self, audio_format="wav", sample_rate=16000,
-                            bits=16, channel=1, use_gzip=True) -> bytes:
+                            bits=16, channel=1, use_gzip=False) -> bytes:
         """构造 full_client_request (JSON 配置)"""
         config = {
             "user": {"uid": "benchmark_test"},
