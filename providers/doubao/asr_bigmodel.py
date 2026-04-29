@@ -281,7 +281,7 @@ class DoubaoBigModelASR(BaseASR):
                 _debug(f"分包: {total_chunks} 包, 每包≈{bytes_per_chunk} bytes")
 
                 # 使用带 sequence 的格式 (flags=0b0001/0b0011)
-                use_seq = kwargs.get("use_sequence", True)
+                use_seq = kwargs.get("use_sequence", False)  # bigmodel 接口由服务端管理 sequence, 客户端不传
                 _debug(f"use_sequence={use_seq}")
 
                 for i in range(total_chunks):
