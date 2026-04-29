@@ -266,9 +266,6 @@ class DoubaoBigModelASR(BaseASR):
                     ws.send_binary(frame)
                     _debug(f"  已发送 chunk {i+1}/{total_chunks} ({len(chunk)}B){' [LAST]' if is_last else ''}")
 
-                    if not is_last:
-                        time.sleep(0.1)
-
                     # 非阻塞接收中间响应
                     if connection_alive:
                         try:
