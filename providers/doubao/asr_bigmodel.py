@@ -1,14 +1,14 @@
 """
 豆包语音 大模型流式语音识别 (ASR) — WebSocket V3 二进制协议
 
-接口说明:
-  协议:  WebSocket
-  地址:  wss://openspeech.bytedance.com/api/v3/sauc/bigmodel
-  鉴权:  X-Api-Key + X-Api-Resource-Id (Header)
-  音频:  采样率 16kHz, 16bit, 单声道
-  格式:  wav / pcm / ogg / mp3
-  分包:  建议每包 200ms, 间隔 100~200ms
-  文档:  https://www.volcengine.com/docs/6561/1354869
+默认使用 bigmodel_nostream (流式输入模式):
+  - 等全部音频发完后返回识别结果, 准确率更高
+  - 平均 5s 音频可在 300~400ms 内返回
+  - 适合批量测试场景
+
+也可切换到 bigmodel (双向流式模式):
+  - 逐包返回识别结果, 延迟更低
+  - 适合实时流式场景
 """
 
 import gzip
@@ -47,16 +47,20 @@ def _extract_text(payload: dict) -> str:
 class DoubaoBigModelASR(BaseASR):
     """豆包语音 — 大模型流式语音识别"""
 
-    WS_URL_ASYNC = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
-    WS_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel"
+    # 流式输入模式 (准确率更高, 适合批量测试)
     WS_URL_NOSTREAM = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream"
+    # 双向流式 (标准版, 实时性更好)
+    WS_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel"
+    # 双向流式 (优化版)
+    WS_URL_ASYNC = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
 
     def __init__(self, api_key: str, resource_id: str,
                  ws_url: str | None = None):
         super().__init__()
         self.api_key = api_key
         self.resource_id = resource_id
-        self.ws_url = ws_url or self.WS_URL
+        # 默认用 nostream, 准确率更高
+        self.ws_url = ws_url or self.WS_URL_NOSTREAM
 
     # ==================== 二进制协议 ====================
 
@@ -81,7 +85,7 @@ class DoubaoBigModelASR(BaseASR):
         serialization = (data[2] >> 4) & 0x0F
         compression = (data[2]) & 0x0F
 
-        # 错误帧: header(4) + error_code(4) + error_size(4) + error_msg
+        # 错误帧
         if msg_type == 0x0F:
             if len(data) < 12:
                 return {"msg_type": msg_type, "msg_specific": msg_specific,
@@ -123,7 +127,8 @@ class DoubaoBigModelASR(BaseASR):
     # ==================== 帧构造 ====================
 
     def _build_config_frame(self, audio_format="wav", sample_rate=16000,
-                            bits=16, channel=1, use_gzip=False) -> bytes:
+                            bits=16, channel=1, language="zh-CN") -> bytes:
+        """构造 full_client_request (JSON 配置)"""
         config = {
             "user": {"uid": "benchmark_test"},
             "audio": {
@@ -140,64 +145,31 @@ class DoubaoBigModelASR(BaseASR):
                 "result_type": "full",
             },
         }
+        # nostream 接口支持 language 参数
+        if self.ws_url.endswith("bigmodel_nostream"):
+            config["audio"]["language"] = language
+
         payload = json.dumps(config, ensure_ascii=False).encode("utf-8")
-        _debug(f"Config JSON ({len(payload)} bytes): {config}")
-        if use_gzip:
-            payload = gzip.compress(payload)
-            header = self._build_header(1, 0b0000, 1, 1)
-        else:
-            header = self._build_header(1, 0b0000, 1, 0)
+        header = self._build_header(1, 0b0000, 1, 0)
         frame = header + struct.pack(">I", len(payload)) + payload
-        _debug(f"Config frame: header={header.hex()} size={len(payload)} total={len(frame)}")
+        _debug(f"Config: {json.dumps(config, ensure_ascii=False)[:300]}")
         return frame
 
     @staticmethod
-    def _build_audio_frame(audio_data: bytes, seq: int, is_last: bool = False,
-                           use_gzip: bool = False, use_sequence: bool = False) -> bytes:
-        compressed = gzip.compress(audio_data) if use_gzip else audio_data
-        comp_flag = 1 if use_gzip else 0
+    def _build_audio_frame(audio_data: bytes, is_last: bool = False) -> bytes:
+        """
+        构造 audio_only_request (不带 sequence)
 
-        if use_sequence:
-            if is_last:
-                header = DoubaoBigModelASR._build_header(2, 0b0011, 0, comp_flag)
-                seq_bytes = struct.pack(">i", -seq)
-            else:
-                header = DoubaoBigModelASR._build_header(2, 0b0001, 0, comp_flag)
-                seq_bytes = struct.pack(">i", seq)
-            frame = header + seq_bytes + struct.pack(">I", len(compressed)) + compressed
+        中间包: flags=0b0000, header(4) + payload_size(4) + payload
+        最后一包: flags=0b0010, header(4) + payload_size(4) + payload
+        """
+        if is_last:
+            header = DoubaoBigModelASR._build_header(2, 0b0010, 0, 0)
         else:
-            if is_last:
-                header = DoubaoBigModelASR._build_header(2, 0b0010, 0, comp_flag)
-            else:
-                header = DoubaoBigModelASR._build_header(2, 0b0000, 0, comp_flag)
-            frame = header + struct.pack(">I", len(compressed)) + compressed
-
-        _debug(f"Audio seq={seq}{'(LAST)' if is_last else ''}: "
-               f"header={header.hex()} size={len(compressed)} total={len(frame)}")
+            header = DoubaoBigModelASR._build_header(2, 0b0000, 0, 0)
+        frame = header + struct.pack(">I", len(audio_data)) + audio_data
+        _debug(f"Audio chunk: {len(audio_data)}B{' [LAST]' if is_last else ''} header={header.hex()}")
         return frame
-
-    # ==================== recv 工具 ====================
-
-    def _recv_response(self, ws):
-        """
-        安全 recv, 返回 (resp_dict, connection_alive)
-        连接关闭时返回 (None, False)
-        """
-        try:
-            data = ws.recv()
-            if isinstance(data, bytes) and len(data) >= 4:
-                resp = self._parse_response(data)
-                _debug(f"  RECV: msg_type={resp['msg_type']} "
-                       f"msg_specific={resp['msg_specific']:04b} "
-                       f"seq={resp['sequence']} "
-                       f"payload={json.dumps(resp.get('payload',{}), ensure_ascii=False)[:300]}")
-                return resp, True
-            return None, True
-        except websocket.WebSocketTimeoutException:
-            return None, True
-        except (websocket.WebSocketConnectionClosedException, ConnectionResetError, OSError) as e:
-            _debug(f"  连接关闭: {type(e).__name__}: {e}")
-            return None, False
 
     # ==================== 识别 ====================
 
@@ -213,7 +185,7 @@ class DoubaoBigModelASR(BaseASR):
             raise TypeError("audio_data 必须是文件路径(str)或音频数据(bytes)")
 
         audio_duration = len(audio) / (sample_rate * 2)
-        _debug(f"音频: {len(audio)} bytes, 时长≈{audio_duration:.2f}s, format={audio_format}, rate={sample_rate}")
+        _debug(f"音频: {len(audio)}B ≈{audio_duration:.2f}s format={audio_format} rate={sample_rate}")
         _debug(f"URL: {self.ws_url}")
 
         request_id = str(uuid.uuid4())
@@ -223,7 +195,6 @@ class DoubaoBigModelASR(BaseASR):
             f"X-Api-Request-Id: {request_id}",
             "X-Api-Sequence: -1",
         ]
-        _debug(f"Headers: {ws_headers}")
 
         start = time.perf_counter()
         result_text = ""
@@ -238,95 +209,81 @@ class DoubaoBigModelASR(BaseASR):
 
             try:
                 # ---- Step 1: 发送 config ----
-                _debug("=== Step 1: 发送 config ===")
                 ws.send_binary(self._build_config_frame(
                     audio_format=audio_format, sample_rate=sample_rate))
 
                 # ---- Step 2: 接收 config ack ----
-                _debug("=== Step 2: config ack ===")
-                resp, connection_alive = self._recv_response(ws)
-                if resp and isinstance(resp.get("payload"), dict):
-                    p = resp["payload"]
-                    if p.get("code") is not None and p["code"] not in (0, 20000000):
-                        raise RuntimeError(f"配置阶段错误: code={p['code']}, message={p.get('message','')}")
-                if self.last_metrics.ttft is None:
-                    self.last_metrics.ttft = time.perf_counter() - start
+                try:
+                    ack_data = ws.recv()
+                    if isinstance(ack_data, bytes) and len(ack_data) >= 4:
+                        ack = self._parse_response(ack_data)
+                        p = ack.get("payload", {})
+                        _debug(f"Config ack: {json.dumps(p, ensure_ascii=False)[:300]}")
+                        if isinstance(p, dict) and p.get("code") is not None:
+                            if p["code"] not in (0, 20000000):
+                                raise RuntimeError(f"配置错误: code={p['code']}, msg={p.get('message','')}")
+                except websocket.WebSocketTimeoutException:
+                    pass
 
-                # ---- Step 3: 分包发送音频 ----
-                _debug("=== Step 3: 分包发送音频 ===")
-                bytes_per_chunk = int(sample_rate * 2 * 0.2)  # 200ms = 6400 bytes
+                # ---- Step 3: 快速发送全部音频 (不等中间响应) ----
+                bytes_per_chunk = int(sample_rate * 2 * 0.2)  # 200ms = 6400B
                 total_chunks = max(1, (len(audio) + bytes_per_chunk - 1) // bytes_per_chunk)
-                _debug(f"分包: {total_chunks} 包, 每包≈{bytes_per_chunk} bytes")
+                _debug(f"发送 {total_chunks} 个音频包...")
 
                 for i in range(total_chunks):
                     chunk = audio[i * bytes_per_chunk : (i + 1) * bytes_per_chunk]
                     is_last = (i == total_chunks - 1)
+                    ws.send_binary(self._build_audio_frame(chunk, is_last=is_last))
 
-                    frame = self._build_audio_frame(chunk, seq=i + 1, is_last=is_last)
-                    ws.send_binary(frame)
-                    _debug(f"  已发送 chunk {i+1}/{total_chunks} ({len(chunk)}B){' [LAST]' if is_last else ''}")
+                _debug(f"全部 {total_chunks} 包已发送, 等待识别结果...")
+                self.last_metrics.ttft = time.perf_counter() - start
 
-                    # 非阻塞接收中间响应
-                    if connection_alive:
-                        try:
-                            ws.settimeout(1)
-                            while connection_alive:
-                                resp, connection_alive = self._recv_response(ws)
-                                if resp is None:
-                                    break
-                                if resp["msg_type"] == 0x0F:
-                                    raise RuntimeError(f"发送阶段服务端错误: {resp.get('payload',{})}")
-                                # 提取中间结果
-                                text = _extract_text(resp.get("payload", {}))
-                                if text:
-                                    result_text = text
-                        finally:
-                            ws.settimeout(60)
-
-                # ---- Step 4: 接收最终结果 ----
-                _debug("=== Step 4: 接收最终结果 ===")
+                # ---- Step 4: 接收识别结果 ----
                 recv_count = 0
                 while connection_alive:
-                    resp, connection_alive = self._recv_response(ws)
-                    if resp is None:
-                        if not connection_alive:
-                            _debug("  连接已关闭 (正常结束)")
-                            break
-                        continue  # timeout
-
-                    recv_count += 1
-
-                    # 错误帧
-                    if resp["msg_type"] == 0x0F:
-                        raise RuntimeError(f"ASR 错误: {resp.get('payload',{})}")
-
-                    # 提取文本
-                    text = _extract_text(resp.get("payload", {}))
-                    if text:
-                        result_text = text
-                        _debug(f"  text: {text[:100]}")
-
-                    if self.last_metrics.ttft is None:
-                        self.last_metrics.ttft = time.perf_counter() - start
-
-                    # 判断是否最终包
-                    msg_specific = resp.get("msg_specific", 0)
-                    if msg_specific in (0b0010, 0b0011) or resp.get("sequence", 0) < 0:
-                        _debug("  收到最终响应")
+                    try:
+                        resp_data = ws.recv()
+                    except websocket.WebSocketTimeoutException:
+                        _debug("recv 超时")
+                        break
+                    except (websocket.WebSocketConnectionClosedException,
+                            ConnectionResetError, OSError) as e:
+                        _debug(f"连接关闭: {type(e).__name__}")
+                        connection_alive = False
                         break
 
-                _debug(f"共收到 {recv_count} 个响应 (connection_alive={connection_alive})")
+                    recv_count += 1
+                    if not isinstance(resp_data, bytes) or len(resp_data) < 4:
+                        continue
+
+                    resp = self._parse_response(resp_data)
+                    msg_type = resp["msg_type"]
+                    msg_specific = resp.get("msg_specific", 0)
+                    payload = resp.get("payload", {})
+
+                    _debug(f"响应 #{recv_count}: msg_type={msg_type} "
+                           f"specific={msg_specific:04b} seq={resp['sequence']} "
+                           f"payload={json.dumps(payload, ensure_ascii=False)[:300]}")
+
+                    if msg_type == 0x0F:
+                        raise RuntimeError(f"ASR 错误: {payload}")
+
+                    text = _extract_text(payload)
+                    if text:
+                        result_text = text
+
+                    if msg_specific in (0b0010, 0b0011) or resp.get("sequence", 0) < 0:
+                        _debug("收到最终响应")
+                        break
 
                 self.last_metrics.total_time = time.perf_counter() - start
-                if self.last_metrics.ttft is None:
-                    self.last_metrics.ttft = self.last_metrics.total_time
+                _debug(f"完成: {recv_count} 个响应, 连接={'存活' if connection_alive else '已关闭'}")
 
             finally:
                 try:
                     ws.close()
                 except Exception:
                     pass
-                _debug("WebSocket 已关闭")
 
         except RuntimeError:
             raise
@@ -334,9 +291,11 @@ class DoubaoBigModelASR(BaseASR):
             _debug(f"❌ 异常: {type(e).__name__}: {e}")
             raise RuntimeError(f"豆包大模型 ASR 调用失败: {e}")
 
+        if self.last_metrics.ttft is None:
+            self.last_metrics.ttft = self.last_metrics.total_time
         if audio_duration > 0 and self.last_metrics.total_time:
             self.last_metrics.rtf = self.last_metrics.total_time / audio_duration
 
-        _debug(f"结果: text='{result_text[:100]}' ttft={self.last_metrics.ttft:.3f}s "
+        _debug(f"结果: '{result_text[:100]}' ttft={self.last_metrics.ttft:.3f}s "
                f"total={self.last_metrics.total_time:.3f}s rtf={self.last_metrics.rtf:.3f}")
         return result_text, self.last_metrics
