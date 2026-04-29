@@ -216,6 +216,7 @@ def main():
     ap.add_argument("--provider", default="xunfei", choices=["xunfei", "aliyun", "doubao"], help="服务方（用于设置默认目录）")
     ap.add_argument("--output", default="cer_results.json", help="输出文件路径（默认 cer_results.json）")
     ap.add_argument("--format", choices=["json", "csv"], default="json", help="输出格式（默认 json）")
+    ap.add_argument("--fuzzy", action="store_true", help="如果启用，忽略CER大于等于1.0的结果")
     args = ap.parse_args()
     
     # 设置默认目录
@@ -234,6 +235,8 @@ def main():
     
     # 计算统计信息
     cer_values = [r["cer"] for r in results]
+    if args.fuzzy:
+        cer_values = [cer for cer in cer_values if cer < 1.0]
     avg_cer = sum(cer_values) / len(cer_values)
     max_cer = max(cer_values)
     min_cer = min(cer_values)
