@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """
-统一批量测试脚本 — 支持 xunfei / aliyun / doubao 多服务方
+统一批量测试脚本 — 支持 xunfei / aliyun / doubao / doubao_bigmodel 多服务方
 用法:
-    python batch.py --provider xunfei --mode all --limit 400 --workers 2
-    python batch.py --provider aliyun  --mode asr --limit 100 --workers 1
-    python batch.py --provider doubao  --mode tts --limit 100 --workers 1
+    # 从 test.tsv 随机抽样 2000 条测试
+    python batch.py --provider xunfei --mode all --sample 2000 --workers 2
+
+    # 指定种子, 保证可复现
+    python batch.py --provider doubao_bigmodel --mode asr --sample 2000 --seed 42
+
+    # 不抽样, 按顺序取前 N 条
+    python batch.py --provider aliyun --mode asr --limit 100 --workers 1
+
+    # 指定自定义数据目录
+    python batch.py --provider xunfei --data_root /path/to/zh-CN --sample 500
 """
 
 import os
@@ -54,10 +62,10 @@ def process_one(provider, mode, seq, total, fname, sentence, audio, tts_out,
                 output_asr_dir):
     """
     处理单条数据（每个线程独立执行）
-    所有 print 内容先拼成字符串，最后一次性原子输出，避免并发交错。
+    所有 print 内容先拼成字符串，最后一次原子输出，避免并发交错。
     mode: asr | tts | all
     """
-    lines = []  # 收集本条所有输出，最后一次性打印
+    lines = []  # 收集本条所有输出，最后一次打印
 
     lines.append(f"\n[{seq}/{total}] {fname}")
     lines.append(f"  原文: {sentence}")
@@ -143,9 +151,14 @@ def main():
                     help="服务方 (xunfei / aliyun / doubao / doubao_bigmodel)")
     ap.add_argument("--mode",      default="all", choices=["asr", "tts", "all"],
                     help="测试模式: asr(仅ASR) / tts(仅TTS) / all(ASR+TTS)")
-    ap.add_argument("--data_root",  default="cv-test/cv-corpus-25.0-2026-03-09/zh-CN_subset_5000",
+    ap.add_argument("--data_root",  default="cv-test/cv-corpus-25.0-2026-03-09/zh-CN",
                     help="数据集目录路径")
-    ap.add_argument("--limit",      type=int, default=1, help="处理条数上限")
+    ap.add_argument("--sample",     type=int, default=None,
+                    help="从 test.tsv 随机抽样的条数 (默认不抽样, 使用全部数据)")
+    ap.add_argument("--limit",      type=int, default=None,
+                    help="处理条数上限 (按顺序取前N条, 不推荐与 --sample 同时使用)")
+    ap.add_argument("--seed",       type=int, default=42,
+                    help="随机种子 (默认 42, 保证可复现)")
     ap.add_argument("--output_asr", default=None, help="ASR 结果输出目录 (默认 outputs/<provider>/asr)")
     ap.add_argument("--output_tts", default=None, help="TTS 音频输出目录 (默认 outputs/<provider>/tts)")
     ap.add_argument("--voice",      default=None, help="TTS 发音人")
@@ -157,14 +170,32 @@ def main():
     out_asr = args.output_asr or f"outputs/{provider}/asr"
     out_tts = args.output_tts or f"outputs/{provider}/tts"
 
-    tsv_path  = os.path.join(args.data_root, "test_subset.tsv")
+    # 查找 TSV: 优先 test.tsv, 回退 test_subset.tsv
+    tsv_path  = None
+    for name in ("test.tsv", "test_subset.tsv"):
+        candidate = os.path.join(args.data_root, name)
+        if os.path.exists(candidate):
+            tsv_path = candidate
+            break
+    if tsv_path is None:
+        sys.exit(f"❌ 未找到 test.tsv 或 test_subset.tsv: {args.data_root}")
+
     clips_dir = os.path.join(args.data_root, "clips")
 
-    if not os.path.exists(tsv_path):
-        sys.exit(f"❌ TSV 不存在: {tsv_path}")
+    df = pd.read_csv(tsv_path, sep="\t")
+    print(f"✅ 加载 TSV: {tsv_path} ({len(df)} 条)")
 
-    df = pd.read_csv(tsv_path, sep="\t").head(args.limit)
-    print(f"✅ 加载 {len(df)} 条数据  (TSV: {tsv_path})")
+    # 随机抽样
+    if args.sample:
+        n = min(args.sample, len(df))
+        df = df.sample(n=n, random_state=args.seed).sort_index()
+        print(f"🎲 随机抽样: {n} 条 (seed={args.seed})")
+
+    # 条数上限
+    if args.limit:
+        df = df.head(args.limit)
+
+    print(f"📊 最终测试: {len(df)} 条")
     print(f"⚡ 服务方: {provider} | 模式: {mode} | 并发: {args.workers}")
 
     os.makedirs(out_asr, exist_ok=True)
