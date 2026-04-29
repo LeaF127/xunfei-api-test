@@ -13,12 +13,19 @@
 协议流程:
   1. 建立 WebSocket 连接（鉴权 Header）
   2. 发送 full_client_request (JSON 配置)
-  3. 按包发送 audio_only_request (200ms/包), 最后一包 flags=0b0010
+  3. 按包发送 audio_only_request (200ms/包), 最后一包 flags=0b0011
   4. 接收 full_server_response (含 sequence), 取最终结果
 
-V3 帧格式 (与 V2 区别):
-  请求: header(4) + payload_size(4) + payload
-  响应: header(4) + sequence(4) + payload_size(4) + payload  ← 多了 sequence
+V3 帧格式:
+  full_client_request:   header(4) + payload_size(4) + payload
+  audio_only_request:    header(4) + sequence(4) + payload_size(4) + payload
+  full_server_response:  header(4) + sequence(4) + payload_size(4) + payload
+
+msg_specific flags:
+  0b0000 - header后不是sequence
+  0b0001 - header后4字节为正数sequence
+  0b0010 - header后不是sequence, 仅指示最后一包
+  0b0011 - header后4字节为负数sequence (最后一包/负包)
 """
 
 import gzip
@@ -113,9 +120,15 @@ class DoubaoBigModelASR(BaseASR):
 
     # ==================== 帧构造 ====================
 
-    def _build_config_frame(self, language="zh-CN",audio_format="wav", sample_rate=16000,
-                            bits=16, channel=1, use_gzip=False) -> bytes:
-        """构造 full_client_request (JSON 配置)"""
+    def _build_config_frame(self, language="zh-CN", audio_format="wav",
+                            sample_rate=16000, bits=16, channel=1,
+                            use_gzip=False) -> bytes:
+        """
+        构造 full_client_request (JSON 配置)
+
+        格式: header(4) + payload_size(4) + payload
+        msg_specific = 0b0000 (header 后面不是 sequence)
+        """
         config = {
             "user": {"uid": "benchmark_test"},
             "audio": {
@@ -136,9 +149,9 @@ class DoubaoBigModelASR(BaseASR):
         payload = json.dumps(config, ensure_ascii=False).encode("utf-8")
         if use_gzip:
             payload = gzip.compress(payload)
-            header = self._build_header(1, 0, 1, 1)
+            header = self._build_header(1, 0b0000, 1, 1)
         else:
-            header = self._build_header(1, 0, 1, 0)
+            header = self._build_header(1, 0b0000, 1, 0)
         return header + struct.pack(">I", len(payload)) + payload
 
     @staticmethod
@@ -147,22 +160,26 @@ class DoubaoBigModelASR(BaseASR):
         """
         构造 audio_only_request
 
-        msg_specific: 0b0001=正数sequence, 0b0010=最后一包(负包)
+        格式: header(4) + sequence(4) + payload_size(4) + payload
+
+        msg_specific flags (文档定义):
+          0b0001 - header后4字节为正数sequence (中间包)
+          0b0011 - header后4字节为负数sequence (最后一包/负包)
         """
         if use_gzip:
             compressed = gzip.compress(audio_data)
             if is_last:
-                header = DoubaoBigModelASR._build_header(2, 0b0010, 0, 1)
+                header = DoubaoBigModelASR._build_header(2, 0b0011, 0, 1)
             else:
                 header = DoubaoBigModelASR._build_header(2, 0b0001, 0, 1)
         else:
             compressed = audio_data
             if is_last:
-                header = DoubaoBigModelASR._build_header(2, 0b0010, 0, 0)
+                header = DoubaoBigModelASR._build_header(2, 0b0011, 0, 0)
             else:
                 header = DoubaoBigModelASR._build_header(2, 0b0001, 0, 0)
 
-        # sequence (signed int32, 最后一包为负数)
+        # sequence: signed int32, 最后一包为负数
         seq_bytes = struct.pack(">i", -seq if is_last else seq)
         return header + seq_bytes + struct.pack(">I", len(compressed)) + compressed
 
@@ -185,7 +202,7 @@ class DoubaoBigModelASR(BaseASR):
         ws_headers = [
             f"X-Api-Key: {self.api_key}",
             f"X-Api-Resource-Id: {self.resource_id}",
-            f"X-Api-Request-Id: {uuid.uuid4()}",
+            f"X-Api-Request-Id: {str(uuid.uuid4())}",
             "X-Api-Sequence: -1",
         ]
 
@@ -217,7 +234,7 @@ class DoubaoBigModelASR(BaseASR):
                                 f"message={p.get('message', '')}")
 
                 # ---- Step 3: 分包发送音频 (200ms/包) ----
-                bytes_per_200ms = sample_rate * 2 * 2  # 16bit * 0.2s
+                bytes_per_200ms = sample_rate * 2 * 2  # 16bit mono * 0.2s
                 total_chunks = max(1, (len(audio) + bytes_per_200ms - 1) // bytes_per_200ms)
 
                 for i in range(total_chunks):
@@ -229,15 +246,14 @@ class DoubaoBigModelASR(BaseASR):
                     frame = self._build_audio_frame(chunk, seq=i + 1, is_last=is_last)
                     ws.send_binary(frame)
 
-                    # 接收服务端中间响应
+                    # 接收服务端中间响应 (非阻塞)
                     try:
                         ws.settimeout(1)
                         while True:
                             try:
                                 resp_data = ws.recv()
                                 if isinstance(resp_data, bytes):
-                                    resp = self._parse_response(resp_data)
-                                    # 记录 TTFT
+                                    self._parse_response(resp_data)
                                     if self.last_metrics.ttft is None:
                                         self.last_metrics.ttft = time.perf_counter() - start
                             except websocket.WebSocketTimeoutException:
@@ -273,7 +289,6 @@ class DoubaoBigModelASR(BaseASR):
                         if isinstance(result_obj, dict) and "text" in result_obj:
                             result_text = result_obj["text"]
                         elif isinstance(result_obj, list) and result_obj:
-                            # 兼容 list 格式
                             for item in result_obj:
                                 if isinstance(item, dict) and "text" in item:
                                     result_text = item["text"]
@@ -282,7 +297,7 @@ class DoubaoBigModelASR(BaseASR):
                     if self.last_metrics.ttft is None:
                         self.last_metrics.ttft = time.perf_counter() - start
 
-                    # 最后一包 (msg_specific=0b0011 或 sequence<0)
+                    # 最后一包结果 (msg_specific=0b0011 或 sequence<0)
                     if msg_specific in (0b0010, 0b0011) or resp.get("sequence", 0) < 0:
                         break
 
