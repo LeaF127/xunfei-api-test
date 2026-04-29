@@ -276,7 +276,7 @@ class DoubaoBigModelASR(BaseASR):
 
                 # ---- Step 3: 分包发送音频 ----
                 _debug("=== Step 3: 分包发送音频 ===")
-                bytes_per_chunk = sample_rate * 2 * 2  # 200ms
+                bytes_per_chunk = int(sample_rate * 2 * 0.2)  # 200ms: 16000*2*0.2=6400
                 total_chunks = max(1, (len(audio) + bytes_per_chunk - 1) // bytes_per_chunk)
                 _debug(f"分包: {total_chunks} 包, 每包≈{bytes_per_chunk} bytes")
 
@@ -311,7 +311,9 @@ class DoubaoBigModelASR(BaseASR):
                                     resp = self._parse_response(resp_data)
                                     _debug(f"  中间响应: msg_type={resp['msg_type']} "
                                            f"seq={resp['sequence']} "
-                                           f"payload_keys={list(resp.get('payload',{}).keys())[:5]}")
+                                           f"payload={json.dumps(resp.get('payload',{}), ensure_ascii=False)[:300]}")
+                                    if resp["msg_type"] == 0x0F:
+                                        raise RuntimeError(f"音频发送阶段服务端错误: {resp.get('payload',{})}")
                                     if self.last_metrics.ttft is None:
                                         self.last_metrics.ttft = time.perf_counter() - start
                             except websocket.WebSocketTimeoutException:
