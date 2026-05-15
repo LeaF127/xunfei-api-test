@@ -308,9 +308,17 @@ def transcribe(audio_path: str, api_key: str, resource_id: str,
     elapsed = time.perf_counter() - start_time
     _debug(f"总耗时: {elapsed:.1f}s, 分句数: {len(all_utterances)}")
 
-    # 去重: 只保留 definite=True 的分句
-    definite_uts = [u for u in all_utterances if u.get("definite")]
-    final_uts = definite_uts if definite_uts else all_utterances
+    # 去重: 按 (start_ms, end_ms) 去重, 同一时间窗口只保留最后一次结果
+    # 流式识别会反复返回同一句话, 后来的结果更准确
+    seen = {}  # (start_ms, end_ms) -> utterance dict
+    for u in all_utterances:
+        key = (u["start_ms"], u["end_ms"])
+        existing = seen.get(key)
+        # definite 结果优先; 同优先级下后者覆盖前者
+        if existing is None or u.get("definite") or not existing.get("definite"):
+            seen[key] = u
+
+    final_uts = sorted(seen.values(), key=lambda u: u["start_ms"])
 
     clean_uts = [{"text": u["text"], "start_ms": u["start_ms"], "end_ms": u["end_ms"]}
                  for u in final_uts]
