@@ -308,15 +308,30 @@ def transcribe(audio_path: str, api_key: str, resource_id: str,
     elapsed = time.perf_counter() - start_time
     _debug(f"总耗时: {elapsed:.1f}s, 分句数: {len(all_utterances)}")
 
-    # 去重: 按 (start_ms, end_ms) 去重, 同一时间窗口只保留最后一次结果
-    # 流式识别会反复返回同一句话, 后来的结果更准确
-    seen = {}  # (start_ms, end_ms) -> utterance dict
-    for u in all_utterances:
-        key = (u["start_ms"], u["end_ms"])
-        existing = seen.get(key)
-        # definite 结果优先; 同优先级下后者覆盖前者
-        if existing is None or u.get("definite") or not existing.get("definite"):
-            seen[key] = u
+    # 去重策略: 流式识别会返回两种结果:
+    #   中间结果: 时间跨度大, 无标点 (覆盖多个短句)
+    #   最终结果: 时间精确, 带标点 (每句独立)
+    # 只保留带标点的最终结果, 再按时间戳去重
+
+    import re as _re
+    _PUNCT_RE = _re.compile(r'[，。？！、；：""''（）,.?!]')
+
+    # Step 1: 分离带标点和不带标点的
+    with_punct = [u for u in all_utterances if _PUNCT_RE.search(u["text"])]
+    without_punct = [u for u in all_utterances if not _PUNCT_RE.search(u["text"])]
+
+    # 优先使用带标点的 (最终结果)
+    if with_punct:
+        candidate_uts = with_punct
+    else:
+        # 回退: 用 definite 标记
+        definite_uts = [u for u in all_utterances if u.get("definite")]
+        candidate_uts = definite_uts if definite_uts else all_utterances
+
+    # Step 2: 按 (start_ms, end_ms) 去重, 同一时间窗口只保留最后一个
+    seen = {}
+    for u in candidate_uts:
+        seen[(u["start_ms"], u["end_ms"])] = u
 
     final_uts = sorted(seen.values(), key=lambda u: u["start_ms"])
 
